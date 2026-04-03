@@ -1,33 +1,29 @@
-//! OIDC authentication library for Kunobi services.
+//! Authentication and authorization framework for Kunobi services.
 //!
-//! # Usage
-//!
+//! # Client usage (CLI, apps)
 //! ```rust,no_run
-//! use kunobi_oidc::{AuthClient, ServiceConfig};
+//! use kunobi_auth::client::{AuthClient, ServiceConfig};
 //!
-//! #[tokio::main]
-//! async fn main() -> anyhow::Result<()> {
-//!     // Discover auth config from service
-//!     let config = ServiceConfig::discover("https://kobe.kunobi.ninja").await?;
+//! # async fn example() -> anyhow::Result<()> {
+//! let config = ServiceConfig::discover("https://kobe.kunobi.ninja").await?;
+//! let client = AuthClient::new(config)?;
+//! let token = client.token().await?;
+//! # Ok(())
+//! # }
+//! ```
 //!
-//!     // Get a valid token (loads cached, refreshes, or browser login)
-//!     let client = AuthClient::new(config)?;
-//!     let token = client.token().await?;
-//!
-//!     println!("Bearer {}", token);
-//!     Ok(())
-//! }
+//! # Server usage (API services)
+//! ```rust,no_run
+//! use kunobi_auth::server::{PolicyEngine, JwksManager};
+//! use kunobi_auth::common::AccessRule;
 //! ```
 
-mod auth;
-mod config;
-mod discovery;
-mod oidc;
-mod store;
-mod token;
+pub mod common;
 
-pub use auth::{AuthClient, TokenProvider};
-pub use config::ServiceConfig;
-pub use discovery::discover;
-pub use store::TokenStore;
-pub use token::StaticTokenAuth;
+#[cfg(feature = "client")]
+pub mod client;
+
+pub mod server;
+
+// Re-export common types at crate root
+pub use common::{AccessRule, AuthError, AuthIdentity, AuthMethod, StatusResponse};

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use tokio::sync::oneshot;
 use tracing::info;
 
-use crate::store::StoredToken;
+use super::store::StoredToken;
 
 /// Perform browser-based OIDC login with PKCE.
 ///
@@ -36,12 +36,10 @@ pub async fn browser_login(
         .context("Failed to build HTTP client")?;
 
     // Discover provider
-    let issuer_url =
-        IssuerUrl::new(issuer.to_string()).context("Invalid issuer URL")?;
-    let provider_metadata =
-        CoreProviderMetadata::discover_async(issuer_url, &http_client)
-            .await
-            .context("Failed to discover OIDC provider")?;
+    let issuer_url = IssuerUrl::new(issuer.to_string()).context("Invalid issuer URL")?;
+    let provider_metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client)
+        .await
+        .context("Failed to discover OIDC provider")?;
 
     // Create client
     let client = CoreClient::from_provider_metadata(
@@ -49,10 +47,7 @@ pub async fn browser_login(
         ClientId::new(client_id.to_string()),
         None, // No client secret (public client)
     )
-    .set_redirect_uri(
-        RedirectUrl::new(redirect_uri.to_string())
-            .context("Invalid redirect URI")?,
-    );
+    .set_redirect_uri(RedirectUrl::new(redirect_uri.to_string()).context("Invalid redirect URI")?);
 
     // Generate PKCE
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
@@ -92,10 +87,7 @@ pub async fn browser_login(
                 let state = params.get("state").cloned().unwrap_or_default();
 
                 if state != expected {
-                    return Html(
-                        "<h1>Error</h1><p>Invalid state parameter.</p>"
-                            .to_string(),
-                    );
+                    return Html("<h1>Error</h1><p>Invalid state parameter.</p>".to_string());
                 }
 
                 if let Some(sender) = tx.lock().await.take() {
@@ -134,13 +126,10 @@ pub async fn browser_login(
     println!("Waiting for authentication in browser...");
 
     // Wait for callback
-    let (code, _state) = tokio::time::timeout(
-        std::time::Duration::from_secs(120),
-        rx,
-    )
-    .await
-    .context("Login timed out after 120 seconds")?
-    .context("Callback channel closed")?;
+    let (code, _state) = tokio::time::timeout(std::time::Duration::from_secs(120), rx)
+        .await
+        .context("Login timed out after 120 seconds")?
+        .context("Callback channel closed")?;
 
     server.abort();
 

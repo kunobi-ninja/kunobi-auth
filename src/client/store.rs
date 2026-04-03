@@ -20,7 +20,7 @@ impl StoredToken {
     pub fn is_expired(&self) -> bool {
         match self.expires_at {
             Some(exp) => chrono::Utc::now().timestamp() > (exp - 60),
-            None => false, // No expiry info — assume valid
+            None => false, // No expiry info -- assume valid
         }
     }
 }

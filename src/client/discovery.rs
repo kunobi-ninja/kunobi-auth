@@ -1,4 +1,4 @@
-use crate::config::ServiceConfig;
+use super::config::ServiceConfig;
 use serde::Deserialize;
 
 /// Response from the service's auth discovery endpoint.

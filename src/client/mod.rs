@@ -1,10 +1,16 @@
+mod config;
+mod discovery;
+mod oidc;
+mod store;
+mod token;
+
+pub use config::ServiceConfig;
+pub use discovery::discover;
+pub use store::{StoredToken, TokenStore};
+pub use token::StaticTokenAuth;
+
 use anyhow::Result;
 use tracing::info;
-
-use crate::config::ServiceConfig;
-use crate::oidc;
-use crate::store::{StoredToken, TokenStore};
-use crate::token::StaticTokenAuth;
 
 /// Token provider -- either OIDC or static token.
 pub enum TokenProvider {

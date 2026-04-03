@@ -1,40 +1,48 @@
 [package]
-name = "kunobi-oidc"
-version = "0.1.0"
+name = "kunobi-auth"
+version = "0.2.0"
 edition = "2021"
 license = "Apache-2.0"
-description = "OIDC authentication library for Kunobi services"
-repository = "https://github.com/kunobi-ninja/kunobi-oidc"
+description = "Authentication and authorization framework for Kunobi services"
+repository = "https://github.com/kunobi-ninja/kunobi-auth"
+
+[features]
+default = ["client", "server"]
+client = ["open", "dirs"]
+server = []
 
 [dependencies]
-# OIDC
+# HTTP / Web
+axum = "0.8"
+reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
+tower = "0.5"
+http = "1"
+
+# OIDC (client-only but always compiled for simplicity)
 openidconnect = "4.0"
 oauth2 = "5.0"
 
-# HTTP
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-
 # Async
-tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
-
-# Localhost callback server
-axum = "0.8"
-
-# Browser
-open = "5"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }
 
 # Serialization
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
+
+# JWT validation (server)
+jsonwebtoken = "9"
+
+# Browser (client)
+open = { version = "5", optional = true }
+
+# Dirs (client)
+dirs = { version = "6", optional = true }
 
 # Crypto
 rand = "0.8"
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
-
-# Dirs
-dirs = "6"
 
 # Errors
 thiserror = "2"

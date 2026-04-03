@@ -28,7 +28,7 @@ fn default_redirect_uri() -> String {
 impl ServiceConfig {
     /// Discover auth configuration from a service endpoint.
     pub async fn discover(endpoint: &str) -> anyhow::Result<Self> {
-        crate::discovery::discover(endpoint).await
+        super::discovery::discover(endpoint).await
     }
 
     /// Create config manually.
