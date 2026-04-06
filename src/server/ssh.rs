@@ -108,14 +108,67 @@ pub fn split_header_params(header: &str) -> Vec<String> {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Placeholders for Task 3 & 4 (added in subsequent commits)
+// Task 3: Nonce tracker for replay protection
 // ──────────────────────────────────────────────────────────────────────────────
 
-// NonceTracker — Task 3
+/// Tracks seen nonces to prevent replay attacks.
+///
+/// Nonces are stored with their insertion time and are evicted once they
+/// exceed `max_age`.
 pub struct NonceTracker {
     seen: RwLock<HashMap<String, Instant>>,
     max_age: Duration,
 }
+
+impl NonceTracker {
+    /// Create a new tracker where nonces are valid for `max_age`.
+    pub fn new(max_age: Duration) -> Self {
+        Self {
+            seen: RwLock::new(HashMap::new()),
+            max_age,
+        }
+    }
+
+    /// Check whether `nonce` has already been seen.
+    ///
+    /// Returns `true` if this is a replay (nonce already present and not yet
+    /// expired).  Returns `false` if the nonce is fresh.  In the fresh case
+    /// the nonce is recorded and expired entries are purged inline.
+    pub async fn check_and_insert(&self, nonce: &str) -> bool {
+        // Fast path: read lock to check for replay.
+        {
+            let seen = self.seen.read().await;
+            if let Some(inserted_at) = seen.get(nonce) {
+                if inserted_at.elapsed() < self.max_age {
+                    return true; // replay
+                }
+                // Entry exists but is expired — fall through to write path.
+            }
+        }
+
+        // Write path: insert new nonce and clean up expired entries.
+        let mut seen = self.seen.write().await;
+        let now = Instant::now();
+
+        // Remove expired entries.
+        seen.retain(|_, inserted_at| inserted_at.elapsed() < self.max_age);
+
+        // Insert the current nonce (or update if it was expired).
+        seen.insert(nonce.to_string(), now);
+
+        false // fresh nonce
+    }
+
+    /// Evict all expired nonces from the tracker.
+    pub async fn cleanup(&self) {
+        let mut seen = self.seen.write().await;
+        seen.retain(|_, inserted_at| inserted_at.elapsed() < self.max_age);
+    }
+}
+
+// ──────────────────────────────────────────────────────────────────────────────
+// Task 4 placeholders (added in the next commit)
+// ──────────────────────────────────────────────────────────────────────────────
 
 // ParsedAuthorizedKey — Task 4
 pub struct ParsedAuthorizedKey {
@@ -169,23 +222,9 @@ pub fn parse_authorized_key(_line: &str) -> Result<ParsedAuthorizedKey, AuthErro
     unimplemented!("Task 4")
 }
 
-impl NonceTracker {
-    pub fn new(_max_age: Duration) -> Self {
-        unimplemented!("Task 3")
-    }
-
-    pub async fn check_and_insert(&self, _nonce: &str) -> bool {
-        unimplemented!("Task 3")
-    }
-
-    pub async fn cleanup(&self) {
-        unimplemented!("Task 3")
-    }
-}
-
 // Suppress dead_code / unused warnings for placeholders
 #[allow(unused)]
-const _: () = {
+const _SUPPRESS: () = {
     let _ = std::mem::size_of::<SshSig>();
     let _ = std::mem::size_of::<Sha256>();
 };
@@ -252,5 +291,36 @@ mod tests {
             r#"fingerprint="SHA256:x",timestamp="1700000000",nonce="n",signature="{sig_b64}",unknown="whatever""#
         );
         assert!(parse_ssh_auth_header(&hdr).is_ok());
+    }
+
+    // ── Task 3 tests ──────────────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn test_nonce_first_use_returns_false() {
+        let tracker = NonceTracker::new(Duration::from_secs(60));
+        assert!(!tracker.check_and_insert("nonce1").await);
+    }
+
+    #[tokio::test]
+    async fn test_nonce_replay_returns_true() {
+        let tracker = NonceTracker::new(Duration::from_secs(60));
+        tracker.check_and_insert("nonce1").await;
+        assert!(tracker.check_and_insert("nonce1").await);
+    }
+
+    #[tokio::test]
+    async fn test_different_nonces_both_return_false() {
+        let tracker = NonceTracker::new(Duration::from_secs(60));
+        assert!(!tracker.check_and_insert("nonce-a").await);
+        assert!(!tracker.check_and_insert("nonce-b").await);
+    }
+
+    #[tokio::test]
+    async fn test_expired_nonce_can_be_reused() {
+        let tracker = NonceTracker::new(Duration::from_nanos(1));
+        tracker.check_and_insert("nonce1").await;
+        std::thread::sleep(Duration::from_millis(5));
+        tracker.cleanup().await;
+        assert!(!tracker.check_and_insert("nonce1").await);
     }
 }
