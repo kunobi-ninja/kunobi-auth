@@ -167,25 +167,33 @@ impl NonceTracker {
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
-// Task 4 placeholders (added in the next commit)
+// Task 4: SSHSIG verification
 // ──────────────────────────────────────────────────────────────────────────────
 
-// ParsedAuthorizedKey — Task 4
+/// A parsed and pre-validated entry from an `authorized_keys` file.
+#[derive(Clone, Debug)]
 pub struct ParsedAuthorizedKey {
+    /// `"SHA256:..."` fingerprint string.
     pub fingerprint: String,
+    /// The parsed public key.
     pub public_key: PublicKey,
+    /// The comment field (e.g. `"user@host"`).
     pub comment: String,
 }
 
-// CompiledSshProvider — Task 4
+/// A compiled SSH provider, ready for efficient signature verification.
+#[derive(Clone, Debug)]
 pub struct CompiledSshProvider {
     pub name: String,
     pub keys: Vec<ParsedAuthorizedKey>,
     pub revoked_fingerprints: HashSet<String>,
+    /// Template for building an identity; `{fingerprint}` and `{comment}`
+    /// are substituted at verification time.
     pub identity_template: String,
 }
 
-// VerifiedSshIdentity — Task 4
+/// The verified identity that emerges from a successful SSH signature check.
+#[derive(Clone, Debug)]
 pub struct VerifiedSshIdentity {
     pub provider_name: String,
     pub fingerprint: String,
@@ -193,41 +201,161 @@ pub struct VerifiedSshIdentity {
     pub identity: String,
 }
 
-// build_signed_message — Task 4
+/// Parse a single `authorized_keys` line into a `ParsedAuthorizedKey`.
+///
+/// Only Ed25519 keys are accepted; all others return
+/// `AuthError::Unauthorized`.
+pub fn parse_authorized_key(line: &str) -> Result<ParsedAuthorizedKey, AuthError> {
+    let key = PublicKey::from_openssh(line)
+        .map_err(|e| AuthError::Unauthorized(format!("invalid authorized_key line: {e}")))?;
+
+    if key.algorithm() != Algorithm::Ed25519 {
+        return Err(AuthError::Unauthorized(format!(
+            "only Ed25519 keys are accepted, got {:?}",
+            key.algorithm()
+        )));
+    }
+
+    let fingerprint = key.fingerprint(HashAlg::Sha256).to_string();
+    let comment = key.comment().to_string();
+
+    Ok(ParsedAuthorizedKey {
+        fingerprint,
+        public_key: key,
+        comment,
+    })
+}
+
+/// Build the canonical signed message from its components.
+///
+/// Format:
+/// ```text
+/// {timestamp}\n{nonce}\n{METHOD} {path_with_query}\n{body_sha256_hex|""}
+/// ```
+///
+/// If `body` is non-empty its SHA-256 digest is hex-encoded; otherwise the
+/// body line is empty.
 pub fn build_signed_message(
-    _timestamp: &str,
-    _nonce: &str,
-    _method: &str,
-    _path_with_query: &str,
-    _body: &[u8],
+    timestamp: &str,
+    nonce: &str,
+    method: &str,
+    path_with_query: &str,
+    body: &[u8],
 ) -> Vec<u8> {
-    unimplemented!("Task 4")
+    let body_hash = if body.is_empty() {
+        String::new()
+    } else {
+        let digest = Sha256::digest(body);
+        hex::encode(digest)
+    };
+
+    format!("{timestamp}\n{nonce}\n{method} {path_with_query}\n{body_hash}")
+        .into_bytes()
 }
 
-// verify_ssh_signature — Task 4
+/// Verify an SSH signature and return the authenticated identity.
+///
+/// Steps:
+/// 1. Parse and drift-check the timestamp.
+/// 2. Look up the key by fingerprint across `providers`.
+/// 3. Check for revocation.
+/// 4. Reconstruct the signed message.
+/// 5. Deserialize the SSHSIG from `header.signature`.
+/// 6. Verify namespace matches.
+/// 7. Verify signature via `public_key.verify(namespace, message, sshsig)`.
+/// 8. Build the identity string from the provider's template.
 pub fn verify_ssh_signature(
-    _header: &SshSignatureHeader,
-    _namespace: &str,
-    _method: &str,
-    _path_with_query: &str,
-    _body: &[u8],
-    _providers: &[CompiledSshProvider],
-    _max_drift: Duration,
+    header: &SshSignatureHeader,
+    namespace: &str,
+    method: &str,
+    path_with_query: &str,
+    body: &[u8],
+    providers: &[CompiledSshProvider],
+    max_drift: Duration,
 ) -> Result<VerifiedSshIdentity, AuthError> {
-    unimplemented!("Task 4")
-}
+    // 1. Validate timestamp drift.
+    let ts_secs: i64 = header
+        .timestamp
+        .parse()
+        .map_err(|_| AuthError::Unauthorized("timestamp must be a unix epoch integer".into()))?;
 
-// parse_authorized_key — Task 4
-pub fn parse_authorized_key(_line: &str) -> Result<ParsedAuthorizedKey, AuthError> {
-    unimplemented!("Task 4")
-}
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| AuthError::Internal(format!("system clock error: {e}")))?
+        .as_secs() as i64;
 
-// Suppress dead_code / unused warnings for placeholders
-#[allow(unused)]
-const _SUPPRESS: () = {
-    let _ = std::mem::size_of::<SshSig>();
-    let _ = std::mem::size_of::<Sha256>();
-};
+    let drift = (now_secs - ts_secs).unsigned_abs();
+    if drift > max_drift.as_secs() {
+        return Err(AuthError::Unauthorized(format!(
+            "timestamp drift of {drift}s exceeds maximum of {}s",
+            max_drift.as_secs()
+        )));
+    }
+
+    // 2. Find key by fingerprint.
+    let mut found_key: Option<(&ParsedAuthorizedKey, &CompiledSshProvider)> = None;
+    'outer: for provider in providers {
+        for key in &provider.keys {
+            if key.fingerprint == header.fingerprint {
+                found_key = Some((key, provider));
+                break 'outer;
+            }
+        }
+    }
+
+    let (parsed_key, provider) = found_key.ok_or_else(|| {
+        AuthError::Unauthorized(format!("no key found for fingerprint {}", header.fingerprint))
+    })?;
+
+    // 3. Check revocation.
+    if provider.revoked_fingerprints.contains(&parsed_key.fingerprint) {
+        return Err(AuthError::Unauthorized(format!(
+            "key {} has been revoked",
+            parsed_key.fingerprint
+        )));
+    }
+
+    // 4. Reconstruct signed message.
+    let message = build_signed_message(
+        &header.timestamp,
+        &header.nonce,
+        method,
+        path_with_query,
+        body,
+    );
+
+    // 5. Deserialize SSHSIG from binary bytes.
+    let sshsig = SshSig::decode(&mut header.signature.as_slice())
+        .map_err(|e| AuthError::Unauthorized(format!("invalid SSHSIG blob: {e}")))?;
+
+    // 6. Verify namespace.
+    if sshsig.namespace() != namespace {
+        return Err(AuthError::Unauthorized(format!(
+            "SSHSIG namespace mismatch: expected '{}', got '{}'",
+            namespace,
+            sshsig.namespace()
+        )));
+    }
+
+    // 7. Verify signature.
+    parsed_key
+        .public_key
+        .verify(namespace, &message, &sshsig)
+        .map_err(|e| AuthError::Unauthorized(format!("signature verification failed: {e}")))?;
+
+    // 8. Build identity.
+    let identity = provider
+        .identity_template
+        .replace("{fingerprint}", &parsed_key.fingerprint)
+        .replace("{comment}", &parsed_key.comment);
+
+    Ok(VerifiedSshIdentity {
+        provider_name: provider.name.clone(),
+        fingerprint: parsed_key.fingerprint.clone(),
+        comment: parsed_key.comment.clone(),
+        identity,
+    })
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Task 2 Tests
@@ -322,5 +450,197 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         tracker.cleanup().await;
         assert!(!tracker.check_and_insert("nonce1").await);
+    }
+
+    // ── Task 4 tests ──────────────────────────────────────────────────────────
+
+    /// A real Ed25519 authorized_keys line for testing.
+    const TEST_ED25519_PUB: &str =
+        "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAIOMqqnkVzrm0SdG6UOoqKLsabgH5C9okWi0dh2l9GKJl test@example.com";
+
+    #[test]
+    fn test_parse_authorized_key_valid() {
+        let k = parse_authorized_key(TEST_ED25519_PUB).unwrap();
+        assert!(k.fingerprint.starts_with("SHA256:"));
+        assert_eq!(k.comment, "test@example.com");
+    }
+
+    #[test]
+    fn test_parse_authorized_key_non_ed25519_rejected() {
+        let ecdsa_key = "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBHxUGDfJZXgCXPMYfKhFMWbHd/F6OJgGsUIMDJYJGzaLLQDn7JDLZ8uS3Z4ZJgU9XdVPvIKW+L6m4GJBgMilAck= test@example.com";
+        let err = parse_authorized_key(ecdsa_key).unwrap_err();
+        assert!(matches!(err, AuthError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn test_build_signed_message_no_body() {
+        let msg = build_signed_message("1700000000", "abc", "GET", "/api/v1/resource", &[]);
+        let text = std::str::from_utf8(&msg).unwrap();
+        assert_eq!(text, "1700000000\nabc\nGET /api/v1/resource\n");
+    }
+
+    #[test]
+    fn test_build_signed_message_with_body() {
+        let body = b"hello";
+        let msg = build_signed_message("1700000000", "abc", "POST", "/api/v1/resource", body);
+        let text = std::str::from_utf8(&msg).unwrap();
+        // SHA-256("hello") = 2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824
+        let expected_hash = "2cf24dba5fb0a30e26e83b2ac5b9e29e1b161e5c1fa7425e73043362938b9824";
+        let expected = format!("1700000000\nabc\nPOST /api/v1/resource\n{expected_hash}");
+        assert_eq!(text, expected);
+    }
+
+    #[tokio::test]
+    async fn test_verify_rejects_expired_timestamp() {
+        let k = parse_authorized_key(TEST_ED25519_PUB).unwrap();
+        let provider = CompiledSshProvider {
+            name: "test".into(),
+            keys: vec![k],
+            revoked_fingerprints: HashSet::new(),
+            identity_template: "{comment}".into(),
+        };
+        let old_ts = "946684800"; // year 2000
+        let sig_b64 = B64.encode(b"dummy");
+        let header_str = format!(
+            r#"fingerprint="SHA256:x",timestamp="{old_ts}",nonce="n",signature="{sig_b64}""#
+        );
+        let header = parse_ssh_auth_header(&header_str).unwrap();
+        let err = verify_ssh_signature(
+            &header,
+            "test-ns",
+            "GET",
+            "/",
+            &[],
+            &[provider],
+            Duration::from_secs(300),
+        )
+        .unwrap_err();
+        assert!(matches!(err, AuthError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn test_verify_rejects_revoked_key() {
+        use rand_core::OsRng;
+        let private_key = ssh_key::PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let public_key = private_key.public_key().clone();
+        let fingerprint = public_key.fingerprint(HashAlg::Sha256).to_string();
+        let comment = public_key.comment().to_string();
+        let parsed = ParsedAuthorizedKey { fingerprint: fingerprint.clone(), public_key, comment };
+
+        let mut revoked = HashSet::new();
+        revoked.insert(fingerprint.clone());
+        let provider = CompiledSshProvider {
+            name: "test".into(),
+            keys: vec![parsed],
+            revoked_fingerprints: revoked,
+            identity_template: "{comment}".into(),
+        };
+
+        let now_ts = current_unix_ts();
+        let message = build_signed_message(&now_ts, "nonce123", "GET", "/", &[]);
+        let sshsig = private_key.sign("test-ns", HashAlg::Sha512, &message).unwrap();
+        let sig_b64 = encode_sshsig(&sshsig);
+
+        let header_str = format!(
+            r#"fingerprint="{fingerprint}",timestamp="{now_ts}",nonce="nonce123",signature="{sig_b64}""#
+        );
+        let header = parse_ssh_auth_header(&header_str).unwrap();
+
+        let err = verify_ssh_signature(
+            &header, "test-ns", "GET", "/", &[], &[provider], Duration::from_secs(300),
+        )
+        .unwrap_err();
+        assert!(matches!(err, AuthError::Unauthorized(_)));
+    }
+
+    #[tokio::test]
+    async fn test_end_to_end_verify_succeeds() {
+        use rand_core::OsRng;
+        let private_key = ssh_key::PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let public_key = private_key.public_key().clone();
+        let fingerprint = public_key.fingerprint(HashAlg::Sha256).to_string();
+        let comment = public_key.comment().to_string();
+        let parsed = ParsedAuthorizedKey {
+            fingerprint: fingerprint.clone(),
+            public_key,
+            comment: comment.clone(),
+        };
+        let provider = CompiledSshProvider {
+            name: "myservice".into(),
+            keys: vec![parsed],
+            revoked_fingerprints: HashSet::new(),
+            identity_template: "ssh:{comment}".into(),
+        };
+
+        let now_ts = current_unix_ts();
+        let body = b"request body";
+        let message = build_signed_message(&now_ts, "unique-nonce", "POST", "/api/v1/action", body);
+        let sshsig = private_key.sign("my-service-ns", HashAlg::Sha512, &message).unwrap();
+        let sig_b64 = encode_sshsig(&sshsig);
+
+        let header_str = format!(
+            r#"fingerprint="{fingerprint}",timestamp="{now_ts}",nonce="unique-nonce",signature="{sig_b64}""#
+        );
+        let header = parse_ssh_auth_header(&header_str).unwrap();
+
+        let identity = verify_ssh_signature(
+            &header, "my-service-ns", "POST", "/api/v1/action", body, &[provider],
+            Duration::from_secs(300),
+        )
+        .unwrap();
+
+        assert_eq!(identity.provider_name, "myservice");
+        assert_eq!(identity.fingerprint, fingerprint);
+        assert_eq!(identity.identity, format!("ssh:{comment}"));
+    }
+
+    #[tokio::test]
+    async fn test_wrong_namespace_fails() {
+        use rand_core::OsRng;
+        let private_key = ssh_key::PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let public_key = private_key.public_key().clone();
+        let fingerprint = public_key.fingerprint(HashAlg::Sha256).to_string();
+        let comment = public_key.comment().to_string();
+        let parsed = ParsedAuthorizedKey { fingerprint: fingerprint.clone(), public_key, comment };
+        let provider = CompiledSshProvider {
+            name: "svc".into(),
+            keys: vec![parsed],
+            revoked_fingerprints: HashSet::new(),
+            identity_template: "{fingerprint}".into(),
+        };
+
+        let now_ts = current_unix_ts();
+        let message = build_signed_message(&now_ts, "n1", "GET", "/", &[]);
+        // Sign with "service-a"
+        let sshsig = private_key.sign("service-a", HashAlg::Sha512, &message).unwrap();
+        let sig_b64 = encode_sshsig(&sshsig);
+
+        let header_str = format!(
+            r#"fingerprint="{fingerprint}",timestamp="{now_ts}",nonce="n1",signature="{sig_b64}""#
+        );
+        let header = parse_ssh_auth_header(&header_str).unwrap();
+
+        // Verify with "service-b" — should fail due to namespace mismatch.
+        let err = verify_ssh_signature(
+            &header, "service-b", "GET", "/", &[], &[provider], Duration::from_secs(300),
+        )
+        .unwrap_err();
+        assert!(matches!(err, AuthError::Unauthorized(_)));
+    }
+
+    // ── Test helpers ─────────────────────────────────────────────────────────
+
+    fn current_unix_ts() -> String {
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs()
+            .to_string()
+    }
+
+    fn encode_sshsig(sshsig: &SshSig) -> String {
+        let mut bytes = Vec::new();
+        sshsig.encode(&mut bytes).unwrap();
+        B64.encode(&bytes)
     }
 }
