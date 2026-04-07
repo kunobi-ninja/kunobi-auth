@@ -60,6 +60,7 @@ anyhow = "1"
 
 # Logging
 tracing = "0.1"
+ssh-agent-client-rs = "1.1.2"
 
 [dev-dependencies]
 http-body-util = "0.1"
