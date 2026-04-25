@@ -61,3 +61,61 @@ jobs:
         run: |
           cargo install cargo-outdated --locked || true
           cargo outdated --exit-code 1 --depth 1 || echo "::warning::Some direct dependencies are outdated"
+
+  e2e:
+    name: E2E (Dex)
+    runs-on: kunobi-runners
+    timeout-minutes: 15
+    needs: checks
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Cache cargo
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-e2e-${{ runner.os }}-
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.93"
+
+      - name: Build Dex image
+        run: docker build -t kunobi-dex -f tests/fixtures/Dockerfile.dex tests/fixtures
+
+      - name: Start Dex
+        run: |
+          docker run --rm -d --name kunobi-dex -p 5556:5556 kunobi-dex
+          # Wait for Dex's discovery endpoint to come up.
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:5556/dex/.well-known/openid-configuration >/dev/null; then
+              echo "Dex is up."
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "::error::Dex did not start within 30s"
+          docker logs kunobi-dex || true
+          exit 1
+
+      - name: Run e2e tests
+        env:
+          # Must match the `issuer:` field in tests/fixtures/dex-config.yaml
+          # so the `iss` claim in JWTs matches what the validator expects.
+          DEX_ISSUER: http://127.0.0.1:5556/dex
+        # --test-threads=1: tests share a Dex instance and refresh-token
+        # rotation invalidates earlier tokens, so they must run serially.
+        run: cargo test --test e2e_dex --all-features -- --ignored --nocapture --test-threads=1
+
+      - name: Dex logs (on failure)
+        if: failure()
+        run: docker logs kunobi-dex || true
+
+      - name: Stop Dex
+        if: always()
+        run: docker rm -f kunobi-dex || true

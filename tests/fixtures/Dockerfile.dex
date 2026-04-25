@@ -1,0 +1,10 @@
+# Pinned Dex image baked with our test config.
+# Built by the CI e2e job and run as a service container so kunobi-auth
+# tests can hit a real OIDC provider.
+FROM ghcr.io/dexidp/dex:v2.41.1
+
+COPY dex-config.yaml /etc/dex/config.yaml
+
+EXPOSE 5556
+ENTRYPOINT ["dex"]
+CMD ["serve", "/etc/dex/config.yaml"]
