@@ -12,8 +12,23 @@ use ssh_encoding::Decode;
 use ssh_encoding::Encode;
 use ssh_key::{Algorithm, HashAlg, PublicKey, SshSig};
 use tokio::sync::RwLock;
+use tracing::warn;
 
 use crate::common::AuthError;
+
+/// Truncate a `"SHA256:..."` fingerprint to a short prefix that is safe to
+/// echo in unauthenticated error responses. The full value is kept in
+/// server-side logs for forensics.
+fn redact_fingerprint(fp: &str) -> String {
+    // Keep the algorithm prefix (e.g. `"SHA256:"`) plus 8 characters.
+    if let Some((prefix, rest)) = fp.split_once(':') {
+        let head: String = rest.chars().take(8).collect();
+        format!("{prefix}:{head}…")
+    } else {
+        let head: String = fp.chars().take(8).collect();
+        format!("{head}…")
+    }
+}
 
 // ──────────────────────────────────────────────────────────────────────────────
 // Task 2: SSH-Signature header parsing
@@ -133,34 +148,29 @@ impl NonceTracker {
         }
     }
 
-    /// Check whether `nonce` has already been seen.
+    /// Check whether `nonce` has already been seen, atomically.
     ///
     /// Returns `true` if this is a replay (nonce already present and not yet
-    /// expired).  Returns `false` if the nonce is fresh.  In the fresh case
-    /// the nonce is recorded and expired entries are purged inline.
+    /// expired). Returns `false` if the nonce is fresh; in that case the nonce
+    /// is recorded and expired entries are purged inline.
+    ///
+    /// The check + insert runs under a single write lock to prevent a TOCTOU
+    /// race where two concurrent requests both observe a nonce as fresh
+    /// before either inserts.
     pub async fn check_and_insert(&self, nonce: &str) -> bool {
-        // Fast path: read lock to check for replay.
-        {
-            let seen = self.seen.read().await;
-            if let Some(inserted_at) = seen.get(nonce) {
-                if inserted_at.elapsed() < self.max_age {
-                    return true; // replay
-                }
-                // Entry exists but is expired — fall through to write path.
-            }
-        }
-
-        // Write path: insert new nonce and clean up expired entries.
         let mut seen = self.seen.write().await;
         let now = Instant::now();
 
-        // Remove expired entries.
+        if let Some(inserted_at) = seen.get(nonce) {
+            if inserted_at.elapsed() < self.max_age {
+                return true; // replay
+            }
+            // Expired entry -- treat as fresh.
+        }
+
         seen.retain(|_, inserted_at| inserted_at.elapsed() < self.max_age);
-
-        // Insert the current nonce (or update if it was expired).
         seen.insert(nonce.to_string(), now);
-
-        false // fresh nonce
+        false
     }
 
     /// Evict all expired nonces from the tracker.
@@ -306,21 +316,33 @@ pub fn verify_ssh_signature(
         }
     }
 
-    let (parsed_key, provider) = found_key.ok_or_else(|| {
-        AuthError::Unauthorized(format!(
-            "no key found for fingerprint {}",
-            header.fingerprint
-        ))
-    })?;
+    let (parsed_key, provider) = match found_key {
+        Some(v) => v,
+        None => {
+            warn!(
+                fingerprint = %header.fingerprint,
+                "SSH auth: no matching key for fingerprint"
+            );
+            return Err(AuthError::Unauthorized(format!(
+                "no key found for fingerprint {}",
+                redact_fingerprint(&header.fingerprint)
+            )));
+        }
+    };
 
     // 3. Check revocation.
     if provider
         .revoked_fingerprints
         .contains(&parsed_key.fingerprint)
     {
+        warn!(
+            fingerprint = %parsed_key.fingerprint,
+            provider = %provider.name,
+            "SSH auth: revoked key presented"
+        );
         return Err(AuthError::Unauthorized(format!(
             "key {} has been revoked",
-            parsed_key.fingerprint
+            redact_fingerprint(&parsed_key.fingerprint)
         )));
     }
 
@@ -459,6 +481,50 @@ mod tests {
         std::thread::sleep(Duration::from_millis(5));
         tracker.cleanup().await;
         assert!(!tracker.check_and_insert("nonce1").await);
+    }
+
+    /// Drive many concurrent insertions of the same nonce: exactly one must
+    /// observe `false` (fresh); every other concurrent task must see `true`
+    /// (replay). Guards against a TOCTOU race in `check_and_insert`.
+    #[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+    async fn test_nonce_concurrent_check_and_insert_is_atomic() {
+        use std::sync::Arc;
+        let tracker = Arc::new(NonceTracker::new(Duration::from_secs(60)));
+
+        let mut handles = Vec::new();
+        for _ in 0..32 {
+            let t = tracker.clone();
+            handles.push(tokio::spawn(async move {
+                t.check_and_insert("contended-nonce").await
+            }));
+        }
+
+        let mut fresh = 0usize;
+        let mut replays = 0usize;
+        for h in handles {
+            if h.await.unwrap() {
+                replays += 1;
+            } else {
+                fresh += 1;
+            }
+        }
+        assert_eq!(fresh, 1, "exactly one task must observe a fresh nonce");
+        assert_eq!(replays, 31, "all other tasks must observe a replay");
+    }
+
+    #[test]
+    fn test_redact_fingerprint_with_prefix() {
+        let r = redact_fingerprint("SHA256:0123456789abcdef0123456789abcdef0123456789abcdef");
+        assert!(r.starts_with("SHA256:01234567"));
+        assert!(r.ends_with('…'));
+        assert!(!r.contains("89abcdef0123"));
+    }
+
+    #[test]
+    fn test_redact_fingerprint_without_prefix() {
+        let r = redact_fingerprint("plainfingerprintabcdef");
+        assert!(r.starts_with("plainfin"));
+        assert!(r.ends_with('…'));
     }
 
     // ── Task 4 tests ──────────────────────────────────────────────────────────
@@ -665,6 +731,130 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, AuthError::Unauthorized(_)));
+    }
+
+    /// Boundary check: a drift of *exactly* `max_drift` seconds must still be
+    /// accepted (`>` comparison, not `>=`).
+    #[tokio::test]
+    async fn test_verify_drift_at_boundary_accepted() {
+        use rand_core::OsRng;
+        let private_key = ssh_key::PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let public_key = private_key.public_key().clone();
+        let fingerprint = public_key.fingerprint(HashAlg::Sha256).to_string();
+        let parsed = ParsedAuthorizedKey {
+            fingerprint: fingerprint.clone(),
+            public_key,
+            comment: "boundary@test".into(),
+        };
+        let provider = CompiledSshProvider {
+            name: "svc".into(),
+            keys: vec![parsed],
+            revoked_fingerprints: HashSet::new(),
+            identity_template: "{fingerprint}".into(),
+        };
+
+        let max_drift = Duration::from_secs(300);
+
+        // Timestamp exactly at the boundary (300s in the past) -- should pass.
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        let ts_boundary = (now_unix - max_drift.as_secs() as i64).to_string();
+
+        let message = build_signed_message(&ts_boundary, "n-bd", "GET", "/", &[]);
+        let sshsig = private_key
+            .sign("svc-ns", HashAlg::Sha512, &message)
+            .unwrap();
+        let sig_b64 = encode_sshsig(&sshsig);
+
+        let header_str = format!(
+            r#"fingerprint="{fingerprint}",timestamp="{ts_boundary}",nonce="n-bd",signature="{sig_b64}""#
+        );
+        let header = parse_ssh_auth_header(&header_str).unwrap();
+
+        let result =
+            verify_ssh_signature(&header, "svc-ns", "GET", "/", &[], &[provider], max_drift);
+        assert!(
+            result.is_ok(),
+            "drift == max_drift must be accepted: {result:?}"
+        );
+    }
+
+    /// Boundary check: a drift of `max_drift + 1` seconds must be rejected.
+    #[tokio::test]
+    async fn test_verify_drift_one_past_boundary_rejected() {
+        use rand_core::OsRng;
+        let private_key = ssh_key::PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let public_key = private_key.public_key().clone();
+        let fingerprint = public_key.fingerprint(HashAlg::Sha256).to_string();
+        let parsed = ParsedAuthorizedKey {
+            fingerprint: fingerprint.clone(),
+            public_key,
+            comment: "over@test".into(),
+        };
+        let provider = CompiledSshProvider {
+            name: "svc".into(),
+            keys: vec![parsed],
+            revoked_fingerprints: HashSet::new(),
+            identity_template: "{fingerprint}".into(),
+        };
+
+        let max_drift = Duration::from_secs(300);
+        let now_unix = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_secs() as i64;
+        // 1s past the limit.
+        let ts_over = (now_unix - max_drift.as_secs() as i64 - 1).to_string();
+
+        let message = build_signed_message(&ts_over, "n-over", "GET", "/", &[]);
+        let sshsig = private_key
+            .sign("svc-ns", HashAlg::Sha512, &message)
+            .unwrap();
+        let sig_b64 = encode_sshsig(&sshsig);
+
+        let header_str = format!(
+            r#"fingerprint="{fingerprint}",timestamp="{ts_over}",nonce="n-over",signature="{sig_b64}""#
+        );
+        let header = parse_ssh_auth_header(&header_str).unwrap();
+
+        let err = verify_ssh_signature(&header, "svc-ns", "GET", "/", &[], &[provider], max_drift)
+            .unwrap_err();
+        assert!(matches!(err, AuthError::Unauthorized(_)));
+    }
+
+    /// The error returned for an unknown fingerprint must NOT contain the
+    /// full fingerprint string sent by the client.
+    #[tokio::test]
+    async fn test_unknown_fingerprint_error_is_redacted() {
+        let now_ts = current_unix_ts();
+        let sig_b64 = B64.encode(b"dummy");
+        let full_fp = "SHA256:abcdef0123456789abcdef0123456789abcdef0123456789abcdef0123456789";
+        let header_str = format!(
+            r#"fingerprint="{full_fp}",timestamp="{now_ts}",nonce="n",signature="{sig_b64}""#
+        );
+        let header = parse_ssh_auth_header(&header_str).unwrap();
+
+        let err = verify_ssh_signature(
+            &header,
+            "ns",
+            "GET",
+            "/",
+            &[],
+            &[],
+            Duration::from_secs(300),
+        )
+        .unwrap_err();
+        let msg = format!("{err}");
+        assert!(
+            !msg.contains(full_fp),
+            "error must not echo full fingerprint: {msg}"
+        );
+        assert!(
+            msg.contains("SHA256:"),
+            "redacted form should keep prefix: {msg}"
+        );
     }
 
     // ── Test helpers ─────────────────────────────────────────────────────────
