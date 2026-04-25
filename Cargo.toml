@@ -11,7 +11,7 @@ categories = ["authentication", "web-programming"]
 
 [features]
 default = ["client", "server"]
-client = ["open", "dirs"]
+client = ["open", "dirs", "tempfile"]
 server = []
 
 [dependencies]
@@ -40,6 +40,9 @@ open = { version = "5", optional = true }
 
 # Dirs (client)
 dirs = { version = "6", optional = true }
+
+# Atomic file writes for client TOFU + token stores
+tempfile = { version = "3", optional = true }
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }

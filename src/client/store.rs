@@ -37,6 +37,7 @@ impl TokenStore {
             .join("kunobi")
             .join("tokens");
         std::fs::create_dir_all(&dir)?;
+        set_dir_mode_0700(&dir)?;
         Ok(Self { dir })
     }
 
@@ -51,17 +52,19 @@ impl TokenStore {
         Ok(Some(token))
     }
 
-    /// Store a token for the given issuer.
+    /// Store a token for the given issuer using an atomic temp-file rename
+    /// so a partial write can never be observed.
     pub fn save(&self, token: &StoredToken) -> Result<()> {
         let path = self.token_path(&token.issuer);
         let data = serde_json::to_string_pretty(token)?;
-        std::fs::write(&path, data)?;
-        // Restrict permissions
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o600))?;
-        }
+
+        let mut tmp = tempfile::NamedTempFile::new_in(&self.dir)?;
+        use std::io::Write as _;
+        tmp.write_all(data.as_bytes())?;
+        tmp.as_file().sync_all()?;
+        set_file_mode_0600(tmp.path())?;
+        tmp.persist(&path)
+            .map_err(|e| anyhow::anyhow!("Failed to persist token file: {}", e.error))?;
         Ok(())
     }
 
@@ -82,6 +85,30 @@ impl TokenStore {
         issuer.hash(&mut hasher);
         self.dir.join(format!("{:x}.json", hasher.finish()))
     }
+}
+
+#[cfg(unix)]
+fn set_file_mode_0600(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_file_mode_0600(_path: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_dir_mode_0700(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))?;
+    Ok(())
+}
+
+#[cfg(not(unix))]
+fn set_dir_mode_0700(_path: &std::path::Path) -> Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]

@@ -5,22 +5,30 @@ use axum::routing::get;
 use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
 use openidconnect::{
     AuthorizationCode, ClientId, CsrfToken, IssuerUrl, Nonce, OAuth2TokenResponse,
-    PkceCodeChallenge, RedirectUrl, Scope, TokenResponse,
+    PkceCodeChallenge, RedirectUrl, RefreshToken, Scope, TokenResponse,
 };
 use std::collections::HashMap;
 use tokio::sync::oneshot;
-use tracing::info;
+use tracing::{info, warn};
 
 use super::store::StoredToken;
+
+fn build_http_client() -> Result<openidconnect::reqwest::Client> {
+    openidconnect::reqwest::ClientBuilder::new()
+        .redirect(openidconnect::reqwest::redirect::Policy::none())
+        .build()
+        .context("Failed to build HTTP client")
+}
 
 /// Perform browser-based OIDC login with PKCE.
 ///
 /// 1. Discovers the OIDC provider
-/// 2. Generates a PKCE challenge
+/// 2. Generates a PKCE challenge + nonce
 /// 3. Opens the browser to the authorization URL
 /// 4. Starts a localhost server to receive the callback
 /// 5. Exchanges the auth code for tokens
-/// 6. Returns the stored token
+/// 6. Validates the ID token (signature, expiry, aud, iss, nonce)
+/// 7. Returns the stored token
 pub async fn browser_login(
     issuer: &str,
     client_id: &str,
@@ -29,48 +37,48 @@ pub async fn browser_login(
 ) -> Result<StoredToken> {
     info!(issuer = %issuer, "Starting OIDC browser login");
 
-    // Build an HTTP client for OIDC operations (no redirects for SSRF safety)
-    let http_client = openidconnect::reqwest::ClientBuilder::new()
-        .redirect(openidconnect::reqwest::redirect::Policy::none())
-        .build()
-        .context("Failed to build HTTP client")?;
+    let http_client = build_http_client()?;
 
-    // Discover provider
     let issuer_url = IssuerUrl::new(issuer.to_string()).context("Invalid issuer URL")?;
     let provider_metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client)
         .await
         .context("Failed to discover OIDC provider")?;
 
-    // Create client
     let client = CoreClient::from_provider_metadata(
         provider_metadata,
         ClientId::new(client_id.to_string()),
-        None, // No client secret (public client)
+        None, // public client (PKCE)
     )
     .set_redirect_uri(RedirectUrl::new(redirect_uri.to_string()).context("Invalid redirect URI")?);
 
-    // Generate PKCE
     let (pkce_challenge, pkce_verifier) = PkceCodeChallenge::new_random_sha256();
 
-    // Build auth URL
+    // Generate the nonce up-front so we can verify it on the returned ID token.
+    let nonce = Nonce::new_random();
+    let nonce_for_check = nonce.clone();
+
     let mut auth_request = client
         .authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
             CsrfToken::new_random,
-            Nonce::new_random,
+            move || nonce.clone(),
         )
         .set_pkce_challenge(pkce_challenge)
         .add_scope(Scope::new("openid".to_string()))
         .add_scope(Scope::new("profile".to_string()))
-        .add_scope(Scope::new("email".to_string()));
+        .add_scope(Scope::new("email".to_string()))
+        .add_scope(Scope::new("offline_access".to_string()));
 
     if let Some(aud) = audience {
-        auth_request = auth_request.add_extra_param("audience", aud);
+        // Send both the RFC 8707 `resource` and the Auth0-style `audience`
+        // parameter so different IdPs all bind a token to this audience.
+        auth_request = auth_request
+            .add_extra_param("audience", aud)
+            .add_extra_param("resource", aud);
     }
 
     let (auth_url, csrf_token, _nonce) = auth_request.url();
 
-    // Start localhost callback server
     let (tx, rx) = oneshot::channel::<(String, String)>();
     let tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(tx)));
 
@@ -103,7 +111,6 @@ pub async fn browser_login(
         }),
     );
 
-    // Parse port from redirect URI
     let port: u16 = redirect_uri
         .split(':')
         .next_back()
@@ -113,19 +120,21 @@ pub async fn browser_login(
 
     let listener = tokio::net::TcpListener::bind(format!("127.0.0.1:{port}"))
         .await
-        .context(format!("Failed to bind to port {port}"))?;
+        .with_context(|| {
+            format!(
+                "Failed to bind to port {port} (already in use?). Adjust ServiceConfig.redirect_uri or free the port."
+            )
+        })?;
 
     let server = tokio::spawn(async move {
         axum::serve(listener, app).await.ok();
     });
 
-    // Open browser
     info!(url = %auth_url, "Opening browser for authentication");
     open::that(auth_url.to_string()).context("Failed to open browser")?;
 
     println!("Waiting for authentication in browser...");
 
-    // Wait for callback
     let (code, _state) = tokio::time::timeout(std::time::Duration::from_secs(120), rx)
         .await
         .context("Login timed out after 120 seconds")?
@@ -133,7 +142,6 @@ pub async fn browser_login(
 
     server.abort();
 
-    // Exchange code for tokens
     info!("Exchanging authorization code for tokens");
     let token_response = client
         .exchange_code(AuthorizationCode::new(code))?
@@ -142,22 +150,87 @@ pub async fn browser_login(
         .await
         .context("Token exchange failed")?;
 
-    // Extract tokens
     let id_token = token_response
         .id_token()
-        .map(|t| t.to_string())
-        .unwrap_or_else(|| token_response.access_token().secret().clone());
+        .context("OIDC token response did not contain an id_token")?;
 
+    let claims = id_token
+        .claims(&client.id_token_verifier(), &nonce_for_check)
+        .context("ID token validation failed (signature/expiry/aud/iss/nonce)")?;
+
+    let claim_issuer = claims.issuer().to_string();
+    if claim_issuer != issuer {
+        warn!(
+            expected = %issuer,
+            actual = %claim_issuer,
+            "ID token issuer differs from configured issuer (using validated claim)"
+        );
+    }
+
+    let id_token_str = id_token.to_string();
     let refresh_token = token_response.refresh_token().map(|t| t.secret().clone());
-
     let expires_at = token_response
         .expires_in()
         .map(|d| chrono::Utc::now().timestamp() + d.as_secs() as i64);
 
     Ok(StoredToken {
-        id_token,
+        id_token: id_token_str,
         refresh_token,
         expires_at,
-        issuer: issuer.to_string(),
+        issuer: claim_issuer,
+    })
+}
+
+/// Refresh an OIDC session using the stored refresh token.
+pub async fn refresh(
+    issuer: &str,
+    client_id: &str,
+    redirect_uri: &str,
+    refresh_token: &str,
+) -> Result<StoredToken> {
+    info!(issuer = %issuer, "Refreshing OIDC token");
+
+    let http_client = build_http_client()?;
+
+    let issuer_url = IssuerUrl::new(issuer.to_string()).context("Invalid issuer URL")?;
+    let provider_metadata = CoreProviderMetadata::discover_async(issuer_url, &http_client)
+        .await
+        .context("Failed to discover OIDC provider")?;
+
+    let client = CoreClient::from_provider_metadata(
+        provider_metadata,
+        ClientId::new(client_id.to_string()),
+        None,
+    )
+    .set_redirect_uri(RedirectUrl::new(redirect_uri.to_string()).context("Invalid redirect URI")?);
+
+    let response = client
+        .exchange_refresh_token(&RefreshToken::new(refresh_token.to_string()))?
+        .request_async(&http_client)
+        .await
+        .context("Refresh-token exchange failed")?;
+
+    let id_token = response
+        .id_token()
+        .context("Refresh-token response did not contain an id_token")?;
+
+    // Refresh responses don't carry a nonce; signature/expiry/aud/iss still
+    // validated.
+    let claims = id_token
+        .claims(&client.id_token_verifier(), |_: Option<&Nonce>| Ok(()))
+        .context("Refreshed ID token validation failed")?;
+
+    let claim_issuer = claims.issuer().to_string();
+    let id_token_str = id_token.to_string();
+    let new_refresh = response.refresh_token().map(|t| t.secret().clone());
+    let expires_at = response
+        .expires_in()
+        .map(|d| chrono::Utc::now().timestamp() + d.as_secs() as i64);
+
+    Ok(StoredToken {
+        id_token: id_token_str,
+        refresh_token: new_refresh.or_else(|| Some(refresh_token.to_string())),
+        expires_at,
+        issuer: claim_issuer,
     })
 }

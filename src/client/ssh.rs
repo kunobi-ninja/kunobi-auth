@@ -168,7 +168,7 @@ impl SshAgentAuth {
         for entry in entries {
             let entry = entry?;
             let path = entry.path();
-            if path.extension().map_or(false, |e| e == "pub") {
+            if path.extension().is_some_and(|e| e == "pub") {
                 if let Ok(content) = std::fs::read_to_string(&path) {
                     let content = content.trim().to_string();
                     if content.starts_with("ssh-ed25519") {
