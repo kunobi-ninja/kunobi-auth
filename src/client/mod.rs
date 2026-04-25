@@ -129,11 +129,32 @@ impl AuthClient {
             if !stored.is_expired() {
                 return Ok(stored.id_token);
             }
-            info!("Token expired, need to re-authenticate");
-            // TODO: implement refresh token flow
+            info!("Token expired, attempting refresh");
+
+            // If we have a refresh token, exchange it for a fresh ID token.
+            if let Some(refresh) = stored.refresh_token.as_deref() {
+                match oidc::refresh(
+                    &config.issuer,
+                    &config.client_id,
+                    &config.redirect_uri,
+                    refresh,
+                )
+                .await
+                {
+                    Ok(refreshed) => {
+                        self.store.save(&refreshed)?;
+                        return Ok(refreshed.id_token);
+                    }
+                    Err(e) => {
+                        info!(error = %e, "Refresh failed, falling back to interactive login");
+                    }
+                }
+            } else {
+                info!("No refresh token available, interactive login required");
+            }
         }
 
-        // No valid cached token -- interactive login
+        // No valid cached token / refresh failed -- interactive login.
         let token = self.login().await?;
         Ok(token.id_token)
     }

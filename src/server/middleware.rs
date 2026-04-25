@@ -96,7 +96,7 @@ where
 }
 
 /// Extract the bearer token from the Authorization header.
-fn extract_bearer_token<'a>(parts: &'a Parts) -> Result<&'a str, AuthError> {
+fn extract_bearer_token(parts: &Parts) -> Result<&str, AuthError> {
     let header = parts
         .headers
         .get("authorization")

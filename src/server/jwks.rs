@@ -7,6 +7,11 @@ use tracing::debug;
 
 const JWKS_CACHE_TTL: std::time::Duration = std::time::Duration::from_secs(300);
 
+/// Minimum interval between forced JWKS refetches triggered by an unknown
+/// `kid`. Prevents an attacker who sends garbage `kid` values from turning
+/// the auth path into an amplification vector against the IdP.
+const KID_MISS_REFRESH_COOLDOWN: std::time::Duration = std::time::Duration::from_secs(30);
+
 #[derive(Debug, Clone, Deserialize)]
 struct Jwk {
     kid: Option<String>,
@@ -49,26 +54,37 @@ impl JwksManager {
     }
 
     /// Validate a JWT and return its claims.
+    ///
+    /// Both `issuer` and `audience` are required and validated against the `iss`
+    /// / `aud` claims. Pass at least one audience.
     pub async fn validate_jwt(
         &self,
         token: &str,
         jwks_url: &str,
+        issuer: &str,
         audience: &[String],
         algorithms: &[String],
     ) -> Result<HashMap<String, serde_json::Value>> {
+        if issuer.is_empty() {
+            anyhow::bail!("issuer must be set; refusing to validate JWT without issuer binding");
+        }
+        if audience.is_empty() {
+            anyhow::bail!(
+                "audience must be set; refusing to validate JWT without audience binding"
+            );
+        }
+
         let header = decode_header(token).context("Invalid JWT header")?;
-
-        let keys = self.get_keys(jwks_url).await?;
-
         let kid = header.kid.as_deref();
+
+        let keys = self.get_keys(jwks_url, kid).await?;
         let key = find_matching_key(&keys, kid)?;
 
         let mut validation = Validation::new(parse_algorithm(algorithms)?);
-        if audience.is_empty() {
-            validation.validate_aud = false;
-        } else {
-            validation.set_audience(audience);
-        }
+        validation.set_audience(audience);
+        validation.set_issuer(&[issuer]);
+        validation.validate_exp = true;
+        validation.validate_nbf = true;
 
         let decoding_key = build_decoding_key(key)?;
         let token_data =
@@ -78,19 +94,27 @@ impl JwksManager {
         Ok(token_data.claims)
     }
 
-    async fn get_keys(&self, jwks_url: &str) -> Result<Vec<Jwk>> {
-        // Check cache
+    /// Fetch JWKS keys, optionally forcing a refetch when `wanted_kid` isn't in
+    /// the cached set (capped by [`KID_MISS_REFRESH_COOLDOWN`]).
+    async fn get_keys(&self, jwks_url: &str, wanted_kid: Option<&str>) -> Result<Vec<Jwk>> {
+        // Check cache.
         {
             let cache = self.cache.read().await;
             if let Some(cached) = cache.get(jwks_url) {
-                if cached.fetched_at.elapsed() < JWKS_CACHE_TTL {
+                let fresh = cached.fetched_at.elapsed() < JWKS_CACHE_TTL;
+                let kid_present = match wanted_kid {
+                    Some(kid) => cached.keys.iter().any(|k| k.kid.as_deref() == Some(kid)),
+                    None => true,
+                };
+                let cooled_down = cached.fetched_at.elapsed() >= KID_MISS_REFRESH_COOLDOWN;
+                if fresh && (kid_present || !cooled_down) {
                     return Ok(cached.keys.clone());
                 }
             }
         }
 
-        // Fetch
-        debug!(url = %jwks_url, "Fetching JWKS");
+        // Miss / stale / forced rotation refetch.
+        debug!(url = %jwks_url, kid = ?wanted_kid, "Fetching JWKS");
         let response: JwksResponse = self
             .http
             .get(jwks_url)
@@ -139,6 +163,10 @@ fn parse_algorithm(algorithms: &[String]) -> Result<Algorithm> {
         "RS512" => Ok(Algorithm::RS512),
         "ES256" => Ok(Algorithm::ES256),
         "ES384" => Ok(Algorithm::ES384),
+        "PS256" => Ok(Algorithm::PS256),
+        "PS384" => Ok(Algorithm::PS384),
+        "PS512" => Ok(Algorithm::PS512),
+        "EdDSA" => Ok(Algorithm::EdDSA),
         _ => anyhow::bail!("Unsupported algorithm: {alg}"),
     }
 }
@@ -166,6 +194,13 @@ fn build_decoding_key(key: &Jwk) -> Result<DecodingKey> {
                 .as_ref()
                 .ok_or_else(|| anyhow::anyhow!("EC key missing 'y'"))?;
             Ok(DecodingKey::from_ec_components(x, y)?)
+        }
+        "OKP" => {
+            let x = key
+                .x
+                .as_ref()
+                .ok_or_else(|| anyhow::anyhow!("OKP key missing 'x'"))?;
+            Ok(DecodingKey::from_ed_components(x)?)
         }
         kty => anyhow::bail!("Unsupported key type: {kty}"),
     }
@@ -206,8 +241,20 @@ mod tests {
     }
 
     #[test]
+    fn test_parse_algorithm_ps256() {
+        let alg = parse_algorithm(&["PS256".to_string()]).unwrap();
+        assert_eq!(alg, Algorithm::PS256);
+    }
+
+    #[test]
+    fn test_parse_algorithm_eddsa() {
+        let alg = parse_algorithm(&["EdDSA".to_string()]).unwrap();
+        assert_eq!(alg, Algorithm::EdDSA);
+    }
+
+    #[test]
     fn test_parse_algorithm_unsupported() {
-        let result = parse_algorithm(&["PS256".to_string()]);
+        let result = parse_algorithm(&["HS256".to_string()]);
         assert!(result.is_err());
         let err_msg = result.unwrap_err().to_string();
         assert!(err_msg.contains("Unsupported algorithm"));
@@ -301,10 +348,26 @@ mod tests {
     }
 
     #[test]
-    fn test_build_decoding_key_unsupported_kty() {
+    fn test_build_decoding_key_okp_missing_x() {
         let jwk = Jwk {
             kid: None,
             kty: "OKP".to_string(),
+            n: None,
+            e: None,
+            x: None,
+            y: None,
+            crv: Some("Ed25519".to_string()),
+        };
+        let result = build_decoding_key(&jwk);
+        assert!(result.is_err());
+        assert!(result.err().unwrap().to_string().contains("missing 'x'"));
+    }
+
+    #[test]
+    fn test_build_decoding_key_unsupported_kty() {
+        let jwk = Jwk {
+            kid: None,
+            kty: "oct".to_string(),
             n: None,
             e: None,
             x: None,
@@ -395,5 +458,25 @@ mod tests {
     #[test]
     fn test_jwks_manager_default() {
         let _manager = JwksManager::default();
+    }
+
+    #[tokio::test]
+    async fn test_validate_jwt_rejects_empty_audience() {
+        let mgr = JwksManager::new();
+        let err = mgr
+            .validate_jwt("token", "https://x/jwks", "https://issuer", &[], &[])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("audience"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_jwt_rejects_empty_issuer() {
+        let mgr = JwksManager::new();
+        let err = mgr
+            .validate_jwt("token", "https://x/jwks", "", &["aud".to_string()], &[])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("issuer"));
     }
 }

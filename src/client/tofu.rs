@@ -4,11 +4,17 @@
 //! Subsequent connections verify the audience matches what was stored.
 //! A mismatch signals a potential MITM and is surfaced as
 //! [`TofuResult::AudienceChanged`].
+//!
+//! The store is process-local-locked (`std::sync::Mutex`) and writes are
+//! atomic via `tempfile::persist`, so concurrent `verify`/`trust` calls
+//! within a process do not race. File permissions are set to `0o600` so
+//! only the owner can read or modify the trust list.
 
 use anyhow::{Context, Result};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::Mutex;
 
 /// A record stored for a single service endpoint.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -36,21 +42,37 @@ pub enum TofuResult {
 /// Persistent TOFU store backed by a JSON file.
 pub struct TofuStore {
     path: PathBuf,
+    /// Process-local lock to serialise read-modify-write sequences.
+    lock: Mutex<()>,
 }
 
 impl TofuStore {
     /// Create a store that uses the default path:
     /// `~/.config/kunobi/known_services.json`.
+    ///
+    /// Eagerly creates `~/.config/kunobi/` with mode `0o700` (unix only).
     pub fn new() -> Result<Self> {
         let path = dirs::home_dir()
             .context("No home directory found")?
             .join(".config/kunobi/known_services.json");
-        Ok(Self { path })
+        if let Some(parent) = path.parent() {
+            std::fs::create_dir_all(parent)
+                .with_context(|| format!("Failed to create {}", parent.display()))?;
+            // Best-effort: tighten permissions on a directory we just claimed.
+            let _ = set_dir_mode_0700(parent);
+        }
+        Ok(Self {
+            path,
+            lock: Mutex::new(()),
+        })
     }
 
     /// Create a store backed by an arbitrary path (useful for tests).
     pub fn with_path(path: PathBuf) -> Self {
-        Self { path }
+        Self {
+            path,
+            lock: Mutex::new(()),
+        }
     }
 
     /// Verify an endpoint + audience pair against the store.
@@ -58,7 +80,11 @@ impl TofuStore {
     /// Does NOT automatically record the entry — call [`Self::trust`] after
     /// prompting the user.
     pub fn verify(&self, endpoint: &str, audience: &str) -> Result<TofuResult> {
-        let known = self.load()?;
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("TOFU store mutex poisoned"))?;
+        let known = self.load_locked()?;
 
         match known.get(endpoint) {
             None => Ok(TofuResult::FirstConnect {
@@ -76,7 +102,11 @@ impl TofuStore {
 
     /// Record (or update) trust for `endpoint` with `audience`.
     pub fn trust(&self, endpoint: &str, audience: &str) -> Result<()> {
-        let mut known = self.load()?;
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("TOFU store mutex poisoned"))?;
+        let mut known = self.load_locked()?;
 
         let now = now_rfc3339();
 
@@ -92,12 +122,12 @@ impl TofuStore {
                 last_seen: now.clone(),
             });
 
-        self.save(&known)
+        self.save_locked(&known)
     }
 
     // ── private helpers ───────────────────────────────────────────────────────
 
-    fn load(&self) -> Result<HashMap<String, KnownService>> {
+    fn load_locked(&self) -> Result<HashMap<String, KnownService>> {
         if !self.path.exists() {
             return Ok(HashMap::new());
         }
@@ -109,23 +139,70 @@ impl TofuStore {
             .with_context(|| format!("Failed to parse {}", self.path.display()))
     }
 
-    fn save(&self, known: &HashMap<String, KnownService>) -> Result<()> {
-        // Ensure parent directory exists.
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)
-                .with_context(|| format!("Failed to create directory {}", parent.display()))?;
-        }
+    fn save_locked(&self, known: &HashMap<String, KnownService>) -> Result<()> {
+        // Ensure parent directory exists. Mode is set in `new()`; we do not
+        // re-chmod here because the parent may already be owned/managed by the
+        // caller (tests pass an arbitrary path under /tmp) and tightening
+        // perms on a system-shared directory will fail or surprise the user.
+        let parent = self
+            .path
+            .parent()
+            .context("TOFU store path must have a parent directory")?;
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory {}", parent.display()))?;
 
         let json =
             serde_json::to_string_pretty(known).context("Failed to serialise known services")?;
 
-        std::fs::write(&self.path, json)
-            .with_context(|| format!("Failed to write {}", self.path.display()))
+        // Atomic write: write to a temp file in the same directory, fsync, then
+        // rename over the destination so a concurrent reader never observes a
+        // half-written file.
+        let mut tmp = tempfile::NamedTempFile::new_in(parent)
+            .with_context(|| format!("Failed to create temp file in {}", parent.display()))?;
+        use std::io::Write as _;
+        tmp.write_all(json.as_bytes())
+            .context("Failed to write TOFU store")?;
+        tmp.as_file()
+            .sync_all()
+            .context("Failed to fsync TOFU store")?;
+
+        set_file_mode_0600(tmp.path())?;
+        tmp.persist(&self.path).map_err(|e| {
+            anyhow::anyhow!(
+                "Failed to persist TOFU store {}: {}",
+                self.path.display(),
+                e.error
+            )
+        })?;
+        Ok(())
     }
 }
 
+#[cfg(unix)]
+fn set_file_mode_0600(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600))
+        .with_context(|| format!("Failed to chmod 0600 {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_file_mode_0600(_path: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
+#[cfg(unix)]
+fn set_dir_mode_0700(path: &std::path::Path) -> Result<()> {
+    use std::os::unix::fs::PermissionsExt;
+    std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
+        .with_context(|| format!("Failed to chmod 0700 {}", path.display()))
+}
+
+#[cfg(not(unix))]
+fn set_dir_mode_0700(_path: &std::path::Path) -> Result<()> {
+    Ok(())
+}
+
 fn now_rfc3339() -> String {
-    // Use chrono if available; fall back to a fixed format via SystemTime.
     chrono::Utc::now().to_rfc3339()
 }
 
@@ -140,7 +217,7 @@ mod tests {
         // Create a temp file path (we delete it so the store starts empty).
         let f = NamedTempFile::new().unwrap();
         let path = f.path().to_path_buf();
-        drop(f); // delete the file — store should handle missing file gracefully
+        drop(f); // delete the file -- store should handle missing file gracefully
         TofuStore::with_path(path)
     }
 
@@ -192,5 +269,15 @@ mod tests {
             }
             other => panic!("expected AudienceChanged, got {other:?}"),
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_file_permissions_are_0600() {
+        use std::os::unix::fs::PermissionsExt;
+        let store = temp_store();
+        store.trust("https://api.example.com", "aud").unwrap();
+        let mode = std::fs::metadata(&store.path).unwrap().permissions().mode() & 0o777;
+        assert_eq!(mode, 0o600, "expected 0o600, got {mode:o}");
     }
 }
