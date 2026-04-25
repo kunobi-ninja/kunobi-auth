@@ -1,0 +1,45 @@
+# Test-only Dex configuration. DO NOT use in production.
+#
+# - `passwordConnector: local` + `enablePasswordDB: true` activate the
+#   deprecated ROPC password grant so CI can fetch tokens with a single
+#   HTTP call (no browser).
+# - Static client `kunobi-test` / secret `test-secret` is used by
+#   tests/e2e_dex.rs.
+# - Static user "test@example.com" / "password" (bcrypt hash from Dex's own
+#   example config -- known plaintext is "password").
+
+issuer: http://127.0.0.1:5556/dex
+
+storage:
+  type: sqlite3
+  config:
+    file: /tmp/dex.db
+
+web:
+  http: 0.0.0.0:5556
+
+# Short rotation so the kid-rotation test path can be exercised in CI.
+expiry:
+  signingKeys: "10s"
+  idTokens: "60s"
+
+oauth2:
+  passwordConnector: local
+
+staticClients:
+  - id: kunobi-test
+    redirectURIs:
+      - http://localhost:8329/callback
+    name: 'kunobi-auth tests'
+    # Public client (PKCE) -- matches kunobi-auth's production usage and lets
+    # the refresh-token grant succeed without client_secret authentication.
+    public: true
+
+enablePasswordDB: true
+staticPasswords:
+  - email: "test@example.com"
+    # bcrypt cost-10 hash of the literal string "password" (htpasswd-generated).
+    # Regenerate with: htpasswd -nbBC 10 "" password | tr -d ':\n'
+    hash: "$2y$10$1xxsAGGNlYB4Q7USxHNNauNkySjtVDUsbLbRwhiDYstyt4on6gxqS"
+    username: "test"
+    userID: "08a8684b-db88-4b73-90a9-3cd1661f5466"
