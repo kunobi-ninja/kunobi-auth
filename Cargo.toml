@@ -11,7 +11,7 @@ categories = ["authentication", "web-programming"]
 
 [features]
 default = ["client", "server"]
-client = ["open", "dirs", "tempfile"]
+client = ["open", "dirs", "tempfile", "sysinfo"]
 server = []
 
 [dependencies]
@@ -43,6 +43,14 @@ dirs = { version = "6", optional = true }
 
 # Atomic file writes for client TOFU + token stores
 tempfile = { version = "3", optional = true }
+
+# Cross-platform process introspection — used by `client::session` to
+# derive the parent shell PID (per-shell session state) and to garbage-
+# collect session files whose owning shell has exited. Picks up
+# different OS-specific implementations behind a portable API so the
+# same code works on Linux, macOS, and Windows. Minimum feature set
+# (just process listings) — we don't read disk/cpu/network.
+sysinfo = { version = "0.32", default-features = false, features = ["system"], optional = true }
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
