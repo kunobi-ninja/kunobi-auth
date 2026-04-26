@@ -1,6 +1,7 @@
 mod config;
 mod discovery;
 pub mod oidc;
+pub mod session;
 pub mod ssh;
 mod store;
 pub mod tofu;
