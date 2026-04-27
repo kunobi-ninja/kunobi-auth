@@ -1,1 +1,5 @@
 /target
+
+# cargo-mutants working directories
+/mutants.out
+/mutants.out.old
