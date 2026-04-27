@@ -6,6 +6,64 @@ to [SemVer](https://semver.org/) for the public API surface.
 
 ## [Unreleased]
 
+## [0.3.0]
+
+This release expands the OAuth2/OIDC surface and adds a server-side
+DPoP verifier. Headless principals (Kubernetes operators, CI workers)
+get a real login flow; the OAuth2 lifecycle is now closed at both ends
+(login + revocation); access-token validation gets a fast path for
+hot endpoints; bearer tokens become sender-constrainable.
+
+### Added
+
+- **OIDC Device Authorization Grant (RFC 8628)** — `oidc::begin_device_flow`,
+  `oidc::begin_device_flow_with_url`, `AuthClient::begin_device_login`,
+  `AuthClient::device_login`. Polling honours §3.5 (`authorization_pending`,
+  `slow_down`, `expired_token`, `access_denied`). The returned ID token is
+  validated against the IdP's JWKS before persistence.
+- **Token introspection (RFC 7662)** — `oidc::introspect`,
+  `AuthClient::introspect`. Returns the standard `IntrospectionResult`
+  with `active`, `scope`, `client_id`, `exp`, etc.
+- **Token revocation (RFC 7009)** — `oidc::revoke`,
+  `AuthClient::logout_async`. Best-effort revocation at the IdP +
+  local file removal. The synchronous `logout()` stays for callers
+  that don't want network on the logout path.
+- **`TokenKind`** enum (`Access` / `Refresh`) for the standard
+  `token_type_hint` parameter on revoke/introspect.
+- **`server::AuthLayer` / `AuthService`** — tower::Layer integration for
+  `AuthnProvider`. `Router::new().layer(AuthLayer::required(provider))`
+  inserts the validated `AuthIdentity` into request extensions; handlers
+  retrieve it with `Extension<AuthIdentity>` and need no per-handler
+  extractor type. `optional()` mode passes through missing headers.
+- **`JwksManager::with_validation_cache(ttl)`** — opt-in per-token
+  validated-claims cache, keyed by SHA-256 of the token. Per-entry
+  lifetime is `min(token.exp, ttl)`. Bounded at 4096 entries with
+  oldest-by-`valid_until` eviction. Trade-off: revoked tokens stay
+  accepted up to `ttl` after revocation; pair with
+  `oidc::introspect` if you need instant revocation.
+- **DPoP server-side verifier (RFC 9449)** — `server::verify_dpop_proof`,
+  `server::ath_for`, `server::jkt_thumbprint`, `server::cnf_jkt`,
+  `server::DpopProof`. Verifies header (`typ=dpop+jwt`, `alg=ES256`,
+  embedded `jwk` is EC P-256), signature, `htm`/`htu` match, `iat`
+  skew, optional `ath` access-token binding, optional `cnf.jkt`
+  thumbprint binding. Replay protection (`jti` tracking) is left to
+  the existing `NonceTracker`.
+- E2E test against Dex for the validation cache and introspection.
+
+### Changed
+
+- OIDC client now also sends RFC 8707 `resource` alongside Auth0-style
+  `audience` on device + auth-code flows.
+
+### Notes
+
+- DPoP is server-side only in this release. Client-side DPoP (per-client
+  keypair + per-request proof signing) is a follow-up; the design choices
+  around key persistence and rotation warrant their own discussion.
+- `oidc::revoke` returns `Err` when the IdP doesn't advertise
+  `revocation_endpoint` in its discovery doc. Dex (≤ 2.41) doesn't
+  implement RFC 7009; Keycloak/Okta/Auth0 do.
+
 ## [0.2.0]
 
 ### Breaking
@@ -64,5 +122,6 @@ to [SemVer](https://semver.org/) for the public API surface.
   `fastrand 2.4.0`. RUSTSEC-2023-0071 (`rsa` Marvin attack) remains unpatched
   upstream and is suppressed in CI's `cargo audit`.
 
-[Unreleased]: https://github.com/kunobi-ninja/kunobi-auth/compare/v0.2.0...HEAD
+[Unreleased]: https://github.com/kunobi-ninja/kunobi-auth/compare/v0.3.0...HEAD
+[0.3.0]: https://github.com/kunobi-ninja/kunobi-auth/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/kunobi-ninja/kunobi-auth/releases/tag/v0.2.0

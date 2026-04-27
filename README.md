@@ -17,10 +17,10 @@ No Kubernetes dependency. Works with any OIDC provider (Auth0, Keycloak, Dex, Ok
 
 ```toml
 # Server only (no browser deps)
-kunobi-auth = { version = "0.2", default-features = false, features = ["server"] }
+kunobi-auth = { version = "0.3", default-features = false, features = ["server"] }
 
 # Client only
-kunobi-auth = { version = "0.2", default-features = false, features = ["client"] }
+kunobi-auth = { version = "0.3", default-features = false, features = ["client"] }
 ```
 
 ## Client usage
