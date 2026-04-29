@@ -1,5 +1,11 @@
 # kunobi-auth
 
+[![CI](https://github.com/kunobi-ninja/kunobi-auth/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kunobi-ninja/kunobi-auth/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/kunobi-ninja/kunobi-auth?label=release&sort=semver&color=blue)](https://github.com/kunobi-ninja/kunobi-auth/releases/latest)
+[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.94-blue.svg)](Cargo.toml)
+[![Rust Edition](https://img.shields.io/badge/edition-2024-orange.svg)](https://doc.rust-lang.org/edition-guide/rust-2024/)
+
 Authentication framework for service APIs. Handles the full authn lifecycle — OIDC browser + device login, refresh-token persistence, token revocation/introspection, JWT validation with caching, SSH-key signed requests, DPoP-bound tokens — so your service focuses on authorization.
 
 **Client side** (CLIs, apps, headless agents): browser-based OIDC login with PKCE, RFC 8628 device-authorization grant, automatic refresh-token flow, RFC 7009 revocation, static-token auth, SSH-agent request signing, per-shell session state.
