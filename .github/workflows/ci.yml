@@ -17,7 +17,7 @@ jobs:
     runs-on: kunobi-runners
     container:
       image: rust:1.94-bookworm
-    timeout-minutes: 10
+    timeout-minutes: 15
     steps:
       - uses: actions/checkout@v4
 
@@ -34,13 +34,19 @@ jobs:
       - name: Add Rust components
         run: rustup component add rustfmt clippy
 
-      # Provisions cargo-audit + cargo-outdated from .mise.toml. Replaces
+      # Provisions cargo-audit from .mise.toml. Replaces
       # the per-run `cargo install --locked` steps below; mise caches the
       # built binaries so re-runs skip the rebuild.
       - name: Install mise tools
         uses: jdx/mise-action@v2
         with:
           experimental: true # required for the `cargo:` backend
+          install_args: rust@1.94.1 cargo:cargo-audit@0.22.1
+
+      - name: Install coverage tool
+        uses: taiki-e/install-action@v2
+        with:
+          tool: cargo-tarpaulin@0.35.4
 
       - name: Check formatting
         run: cargo fmt --check
@@ -50,6 +56,17 @@ jobs:
 
       - name: Tests
         run: cargo test --all-features
+
+      - name: Coverage
+        run: cargo tarpaulin --engine llvm --all-features --workspace --out Json --output-dir coverage --fail-under 50
+
+      - name: Upload coverage report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: coverage
+          path: coverage/tarpaulin-report.json
+          if-no-files-found: warn
 
       - name: Build (all features)
         run: cargo build --all-features
@@ -97,6 +114,9 @@ jobs:
       # so both jobs share one source of truth.
       - name: Install mise tools
         uses: jdx/mise-action@v2
+        with:
+          experimental: true # .mise.toml also defines cargo-backed local tools
+          install_args: rust@1.94.1
 
       - name: Build Dex image
         run: docker build -t kunobi-dex -f tests/fixtures/Dockerfile.dex tests/fixtures

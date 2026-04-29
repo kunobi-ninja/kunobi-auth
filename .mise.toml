@@ -28,3 +28,11 @@ run = "cargo mutants --no-times --timeout-multiplier 2 -- --all-features"
 [tasks."mutants:file"]
 description = "Run mutants on a single file (e.g. mise run mutants:file -- src/server/jwks.rs)"
 run = "cargo mutants --no-times --timeout-multiplier 2 -- --all-features --file"
+
+[tasks.coverage]
+description = "Run Rust test coverage with cargo-tarpaulin."
+run = "cargo tarpaulin --engine llvm --all-features --workspace --out Json --output-dir coverage"
+
+[tasks."coverage:html"]
+description = "Run Rust test coverage and render an HTML report."
+run = "cargo tarpaulin --engine llvm --all-features --workspace --out Html --output-dir coverage"
