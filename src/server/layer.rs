@@ -174,6 +174,9 @@ where
     }
 }
 
+/// Reads the first `Authorization` header. See `middleware::extract_bearer_token`
+/// for the reasoning -- multiple `Authorization` headers are forbidden by
+/// RFC 7230 §3.2.2; we don't try to merge them.
 fn extract_bearer<B>(req: &Request<B>) -> Option<&str> {
     req.headers()
         .get("authorization")

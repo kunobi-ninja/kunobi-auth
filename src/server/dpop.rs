@@ -75,13 +75,31 @@ pub struct DpopProof {
 /// Steps (RFC 9449 §4.3):
 /// 1. Parse JWT header; reject unless `typ=dpop+jwt`, `alg=ES256`, `jwk` is present.
 /// 2. Verify signature using the embedded `jwk`.
-/// 3. Verify `htm` matches `expected_method`.
-/// 4. Verify `htu` matches `expected_url`.
+/// 3. Verify `htm` matches `expected_method` (case-insensitive per RFC 9110).
+/// 4. Verify `htu` matches `expected_url` (**byte-exact** -- see contract below).
 /// 5. Verify `iat` is within `max_iat_skew` of now.
 /// 6. If `expected_ath_for` is `Some(token)`, verify `ath == base64url(SHA256(token))`.
 /// 7. If `expected_jkt` is `Some(jkt)`, verify the proof's JWK thumbprint matches.
 ///
-/// Caller responsibilities (NOT done here, by design):
+/// # `expected_url` contract
+///
+/// The `htu` claim is compared byte-exact -- no URL canonicalisation is
+/// performed. Pass the URL exactly as the client did when signing:
+///
+/// - **Same scheme casing** -- `https://` not `HTTPS://`
+/// - **No trailing slash difference** -- `/users` and `/users/` are different
+/// - **Same query-parameter order and encoding** -- the client's serialiser
+///   determines the canonical form; the server has to match it
+/// - **No fragment** -- RFC 9449 §4.2 forbids the fragment in `htu`
+///
+/// Strict matching is the safe default: it cannot accept anything the client
+/// didn't intend. If your downstream needs URL normalisation (lowercasing the
+/// host, sorting query params, collapsing duplicate slashes), do it on the
+/// `expected_url` side *before* calling this function -- and document
+/// whatever rule you apply, because the client must apply the same rule.
+///
+/// # Caller responsibilities (NOT done here, by design)
+///
 /// - Pass `proof.jti` to a NonceTracker to detect replay.
 /// - Validate the access token itself separately (signature, exp, aud, iss).
 pub fn verify_dpop_proof(
