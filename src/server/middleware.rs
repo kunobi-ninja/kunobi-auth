@@ -96,6 +96,12 @@ where
 }
 
 /// Extract the bearer token from the Authorization header.
+///
+/// Reads the *first* `Authorization` header. RFC 7230 §3.2.2 forbids
+/// duplicate non-list headers, so well-behaved proxies/clients send at most
+/// one. If a misbehaving upstream forwards multiple, we reject all but the
+/// first -- the safer behaviour than parsing comma-joined values which
+/// `Authorization` doesn't support per its grammar.
 fn extract_bearer_token(parts: &Parts) -> Result<&str, AuthError> {
     let header = parts
         .headers

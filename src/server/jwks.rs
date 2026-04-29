@@ -261,6 +261,13 @@ async fn insert_validated(
     entries.retain(|_, v| v.valid_until > now);
 
     // Hard cap on size: drop oldest-by-valid_until until under the limit.
+    // Capacity-driven evictions are visible to operators -- a sustained
+    // stream means a hostile (or just chatty) client is filling the cache
+    // with unique tokens faster than legitimate ones expire, and legit
+    // entries are paying for it. The warning is rate-limited by virtue of
+    // only firing on actual evictions; under the typical "small token
+    // population, cache fits everyone" regime it never fires.
+    let mut evicted_due_to_cap = 0u32;
     while entries.len() >= VALIDATION_CACHE_MAX {
         if let Some(oldest_key) = entries
             .iter()
@@ -268,9 +275,19 @@ async fn insert_validated(
             .map(|(k, _)| *k)
         {
             entries.remove(&oldest_key);
+            evicted_due_to_cap += 1;
         } else {
             break;
         }
+    }
+    if evicted_due_to_cap > 0 {
+        tracing::warn!(
+            evicted = evicted_due_to_cap,
+            cap = VALIDATION_CACHE_MAX,
+            "validation cache at capacity; evicted {evicted_due_to_cap} live entries to fit a new token. \
+             Sustained logging of this message means a high-cardinality token stream is flushing legit entries -- \
+             investigate the source or raise the cap."
+        );
     }
 
     entries.insert(

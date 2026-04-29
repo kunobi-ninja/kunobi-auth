@@ -562,7 +562,13 @@ pub async fn begin_device_flow_with_url(
     let auth: DeviceAuthorizationResponse =
         serde_json::from_str(&text).with_context(|| format!("bad device-auth JSON: {text}"))?;
 
-    let interval = Duration::from_secs(auth.interval.unwrap_or(5));
+    // Clamp the server-supplied poll interval. RFC 8628 §3.2 recommends 5s
+    // as the default; some IdPs misbehave (return 0, return very large
+    // numbers, etc.). 5s..=60s keeps us well-behaved under both a misconfigured
+    // IdP that wants tight polling (which would DoS them) and one that wants
+    // glacial polling (which would make the user wait forever).
+    let server_interval = auth.interval.unwrap_or(5);
+    let interval = Duration::from_secs(server_interval.clamp(5, 60));
     let expires_at = Instant::now() + Duration::from_secs(auth.expires_in);
 
     Ok(DeviceFlowHandle {
