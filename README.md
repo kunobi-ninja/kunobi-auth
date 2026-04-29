@@ -377,10 +377,30 @@ Refresh-token flow: when a cached ID token is past its expiry (with a 60s buffer
 Toolchain is pinned via [`mise`](https://mise.jdx.dev). One-time setup:
 
 ```sh
-mise install   # provisions Rust + cargo-audit + cargo-mutants from .mise.toml
+mise install   # provisions Rust + cargo-audit + cargo-mutants
 ```
 
 CI uses the same `.mise.toml` so local and CI runs match.
+
+### Coverage
+
+The crate uses [`cargo-tarpaulin`](https://github.com/xd009642/tarpaulin)
+for Rust coverage. CI runs the same command with a conservative initial
+`60%` line-coverage floor and uploads `coverage/tarpaulin-report.json`
+as a workflow artifact.
+
+```sh
+cargo install cargo-tarpaulin --locked --version 0.35.4
+mise run coverage       # JSON report in ./coverage
+mise run coverage:html  # HTML report in ./coverage
+```
+
+On macOS, installing Tarpaulin may require `pkg-config`/OpenSSL
+development headers (for example, `brew install pkgconf openssl`).
+
+Coverage is a trend signal, not a security proof. For auth-critical
+boundaries, prefer adding focused tests and pinning them with mutation
+testing where practical.
 
 ### Mutation testing
 
