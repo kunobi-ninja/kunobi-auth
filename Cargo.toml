@@ -13,6 +13,7 @@ categories = ["authentication", "web-programming"]
 default = ["client", "server"]
 client = ["open", "dirs", "tempfile", "sysinfo"]
 server = []
+mcp-server = ["server"]
 
 [dependencies]
 # HTTP / Web
