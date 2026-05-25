@@ -18,12 +18,16 @@ No Kubernetes dependency. Tested end-to-end against [Dex](https://dexidp.io/) v2
 
 | Feature  | Default | Includes                                                                                                                                                                                                                          |
 | -------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `client` | yes     | OIDC browser login (PKCE), device-authorization grant, refresh-token flow, token introspection + revocation, static-token, SSH-agent signing, TOFU audience pinning, per-shell session state                                      |
-| `server` | yes     | JWT/JWKS validation (RS/PS/ES/EdDSA + auto-rotating cache), opt-in per-token validation cache, DPoP proof verifier (RFC 9449), SSH-signature verification with atomic-replay-protected nonce tracker, `AuthLayer` + axum extractors |
+| `client`     | yes     | OIDC browser login (PKCE), device-authorization grant, refresh-token flow, token introspection + revocation, static-token, SSH-agent signing, TOFU audience pinning, per-shell session state                                      |
+| `server`     | yes     | JWT/JWKS validation (RS/PS/ES/EdDSA + auto-rotating cache), opt-in per-token validation cache, DPoP proof verifier (RFC 9449), SSH-signature verification with atomic-replay-protected nonce tracker, `AuthLayer` + axum extractors |
+| `mcp-server` | no      | MCP resource-server helpers on top of `server`: OAuth Protected Resource Metadata, MCP `WWW-Authenticate` challenges, and required bearer auth middleware                                           |
 
 ```toml
 # Server only (no browser deps)
 kunobi-auth = { git = "https://github.com/kunobi-ninja/kunobi-auth", tag = "v0.5.0", default-features = false, features = ["server"] }
+
+# MCP server only
+kunobi-auth = { git = "https://github.com/kunobi-ninja/kunobi-auth", tag = "v0.5.0", default-features = false, features = ["mcp-server"] }
 
 # Client only
 kunobi-auth = { git = "https://github.com/kunobi-ninja/kunobi-auth", tag = "v0.5.0", default-features = false, features = ["client"] }
@@ -170,6 +174,48 @@ let app = Router::new()
     .route("/me", get(me))
     .with_state(auth);
 ```
+
+### MCP server auth
+
+Use the `mcp-server` feature when exposing authenticated HTTP MCP endpoints.
+It wraps any `AuthnProvider` and adds MCP-specific discovery/challenge behavior.
+
+```rust
+use axum::{routing::post, Router};
+use kunobi_auth::server::{
+    AuthBuilder, McpServerAuthConfig, ProtectedResourceMetadata,
+};
+
+async fn mcp_handler() {}
+
+fn build_app() -> Result<Router, Box<dyn std::error::Error>> {
+    let auth = AuthBuilder::new()
+        .oidc(
+            "issuer",
+            "https://auth.example.com",
+            "https://auth.example.com/.well-known/jwks.json",
+            vec!["https://crawl.example.com/mcp".into()],
+        )
+        .build();
+
+    let mcp_auth = McpServerAuthConfig::new(
+        ProtectedResourceMetadata::new(
+            "https://crawl.example.com/mcp",
+            ["https://auth.example.com"],
+        )
+        .scopes_supported(["crawl:read"]),
+    )?;
+
+    Ok(Router::new()
+        .merge(mcp_auth.metadata_router())
+        .route("/mcp", post(mcp_handler).layer(mcp_auth.layer(auth))))
+}
+```
+
+Missing or invalid tokens return `401` with a `WWW-Authenticate` challenge
+that points clients at the protected-resource metadata document. For a
+resource with path `/mcp`, the metadata route is derived as
+`/.well-known/oauth-protected-resource/mcp` per RFC 9728.
 
 ### Axum extractors (recommended)
 
