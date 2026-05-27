@@ -58,7 +58,7 @@ chrono = { version = "0.4", features = ["serde"] }
 
 # SSH key parsing
 ssh-key = { version = "0.6", features = ["ed25519", "alloc", "rand_core"] }
-ssh-encoding = "0.2"
+ssh-encoding = "0.3"
 sha2 = "0.11"
 
 # Encoding
