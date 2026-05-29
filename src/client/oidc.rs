@@ -442,6 +442,10 @@ pub struct DeviceFlowHandle {
     token_endpoint: String,
     jwks_uri: String,
     client_id: String,
+    /// Audience the token is expected to be bound to. When `None`, the
+    /// `client_id` is used as the audience (the common convention for IdPs
+    /// that issue the ID token to the client itself).
+    audience: Option<String>,
     device_code: String,
     interval: Duration,
     expires_at: Instant,
@@ -582,6 +586,7 @@ pub async fn begin_device_flow_with_url(
         token_endpoint: token_endpoint.to_string(),
         jwks_uri: jwks_uri.to_string(),
         client_id: client_id.to_string(),
+        audience: audience.map(str::to_string),
         device_code: auth.device_code,
         interval,
         expires_at,
@@ -623,8 +628,14 @@ impl DeviceFlowHandle {
             if status.is_success() {
                 let body: DeviceTokenResponse = serde_json::from_str(&text)
                     .with_context(|| format!("bad token JSON: {text}"))?;
-                return finalize_device_token(body, &self.issuer, &self.jwks_uri, &self.client_id)
-                    .await;
+                return finalize_device_token(
+                    body,
+                    &self.issuer,
+                    &self.jwks_uri,
+                    &self.client_id,
+                    self.audience.as_deref(),
+                )
+                .await;
             }
 
             // RFC 8628 §3.5: token endpoint returns 400 with one of these
@@ -656,21 +667,24 @@ async fn finalize_device_token(
     issuer: &str,
     jwks_uri: &str,
     client_id: &str,
+    audience: Option<&str>,
 ) -> Result<StoredToken> {
     let id_token = body
         .id_token
         .or(body.access_token)
         .context("Device token response had neither id_token nor access_token")?;
 
-    // Validate the ID token via JwksManager (signature, exp, aud=client_id, iss).
-    // Device flow does not carry a nonce, so we don't check one.
+    // Validate the ID token via JwksManager (signature, exp, aud, iss). Device
+    // flow does not carry a nonce, so we don't check one. The audience defaults
+    // to the client_id when none was configured.
+    let expected_audience = audience.unwrap_or(client_id).to_string();
     let jwks = crate::server::JwksManager::new();
     let claims = jwks
         .validate_jwt(
             &id_token,
             jwks_uri,
             issuer,
-            &[client_id.to_string()],
+            &[expected_audience],
             &["RS256".to_string()],
         )
         .await

@@ -19,6 +19,11 @@ const KID_MISS_REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 /// entries on insert to keep memory bounded under unique-token churn.
 const VALIDATION_CACHE_MAX: usize = 4096;
 
+/// Hard cap on a JWKS response body. The endpoint is operator-configured and
+/// trusted, but a compromised or misbehaving IdP shouldn't be able to make us
+/// buffer an unbounded body. 1 MiB comfortably fits any realistic key set.
+const MAX_JWKS_BYTES: usize = 1024 * 1024;
+
 #[derive(Debug, Clone, Deserialize)]
 struct Jwk {
     kid: Option<String>,
@@ -184,15 +189,29 @@ impl JwksManager {
 
         // Miss / stale / forced rotation refetch.
         debug!(url = %jwks_url, kid = ?wanted_kid, "Fetching JWKS");
-        let response: JwksResponse = self
+        let mut resp = self
             .http
             .get(jwks_url)
             .send()
             .await
-            .context("Failed to fetch JWKS")?
-            .json()
+            .context("Failed to fetch JWKS")?;
+
+        // Stream the body with a hard byte cap so a compromised/misbehaving IdP
+        // can't make us buffer an unbounded response. We abort as soon as the
+        // accumulated size would exceed the limit, rather than buffering first.
+        let mut body = Vec::new();
+        while let Some(chunk) = resp
+            .chunk()
             .await
-            .context("Failed to parse JWKS")?;
+            .context("Failed to read JWKS response body")?
+        {
+            if body.len() + chunk.len() > MAX_JWKS_BYTES {
+                anyhow::bail!("JWKS response exceeds the {MAX_JWKS_BYTES}-byte limit");
+            }
+            body.extend_from_slice(&chunk);
+        }
+        let response: JwksResponse =
+            serde_json::from_slice(&body).context("Failed to parse JWKS")?;
 
         let keys = response.keys;
         self.cache.write().await.insert(

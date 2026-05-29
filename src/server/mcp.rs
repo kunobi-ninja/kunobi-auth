@@ -425,7 +425,11 @@ fn extract_bearer<B>(req: &Request<B>) -> Option<&str> {
         .headers()
         .get(header::AUTHORIZATION)
         .and_then(|value| value.to_str().ok())?;
-    if header.len() > 7 && header[..7].eq_ignore_ascii_case("Bearer ") {
+    // `header.get(..7)` returns `None` when the header is shorter than 7 bytes
+    // *or* when byte 7 isn't a UTF-8 char boundary -- so a header like
+    // `Authorization: €€€` can never panic the way `header[..7]` would.
+    let prefix = header.get(..7)?;
+    if prefix.eq_ignore_ascii_case("Bearer ") {
         Some(&header[7..])
     } else {
         None
@@ -625,6 +629,32 @@ mod tests {
             .unwrap();
         assert_eq!(response.status(), StatusCode::OK);
         assert_eq!(body_text(response).await, "user-1");
+    }
+
+    #[tokio::test]
+    async fn mcp_auth_layer_handles_multibyte_authorization_without_panicking() {
+        // A header whose first bytes are multibyte UTF-8 used to panic
+        // `&header[..7]` on a non-char-boundary. It must now be treated as a
+        // missing/invalid scheme and answered with a 401 challenge.
+        async fn handler() -> &'static str {
+            "ok"
+        }
+
+        let app = Router::new()
+            .route("/mcp", get(handler))
+            .layer(config().layer(TestAuth));
+
+        let response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/mcp")
+                    .header(header::AUTHORIZATION, "€€€")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::UNAUTHORIZED);
     }
 
     #[tokio::test]

@@ -162,6 +162,19 @@ pub fn split_header_params(header: &str) -> Vec<String> {
 /// at default `MAX_FUTURE_CLOCK_SKEW`). Set `max_age >= max_drift` to be
 /// safe; setting `max_age` shorter creates a window where drift still
 /// passes but the nonce has been forgotten -- a replay primitive.
+///
+/// **Call ordering (important)**: verify the signature with
+/// [`verify_ssh_signature`] *first*, and only call [`Self::check_and_insert`]
+/// once the signature is known-good. Consuming a nonce slot before
+/// authenticating lets an unauthenticated client flood the tracker with junk
+/// nonces and trip the capacity limit (see below) — turning replay protection
+/// into a denial-of-service primitive. Authenticate, then record.
+///
+/// **Capacity**: the tracker holds at most `max_entries` live nonces (default
+/// 4096 via [`NonceTracker::new`]); once full, *new* nonces are rejected until
+/// entries age out. Size `max_entries` for your peak rate of distinct
+/// authenticated callers within `max_age`, and keep `max_age` as tight as the
+/// drift contract allows so slots free up quickly.
 pub struct NonceTracker {
     seen: RwLock<HashMap<String, Instant>>,
     max_age: Duration,

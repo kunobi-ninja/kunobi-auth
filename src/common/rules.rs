@@ -20,6 +20,18 @@ pub struct AuthMethod {
 }
 
 /// OIDC provider configuration for JWT validation.
+///
+/// **This is a declarative descriptor, not an enforcement engine.** It is a
+/// serialization-friendly representation of an OIDC method (e.g. as published
+/// in service discovery or a CRD) for consumers to map onto the actual
+/// validator. The crate's own validation path is
+/// [`JwtAuthConfig`](crate::server::JwtAuthConfig) /
+/// [`AuthBuilder`](crate::server::AuthBuilder); constructing an `OidcAuth` does
+/// **not** by itself cause any claim to be checked. In particular `audience`
+/// and `authorized_parties` below are inert unless your code wires them into a
+/// validator. Map them onto [`JwtAuthConfig`](crate::server::JwtAuthConfig)
+/// (`audience` / `JwtAuthConfig::authorized_parties`), which enforces both —
+/// note it *requires* a non-empty audience.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct OidcAuth {
@@ -28,10 +40,14 @@ pub struct OidcAuth {
     /// JWKS URL for key fetching. Defaults to `{issuer}/.well-known/jwks.json`.
     #[serde(default)]
     pub jwks_url: Option<String>,
-    /// Expected audience (`aud` claim). Empty = skip validation.
+    /// Expected audience (`aud` claim). Declarative only — see the type-level
+    /// note. Map this onto a validator that enforces it; an empty value here is
+    /// not a validator instruction to "skip audience checks".
     #[serde(default)]
     pub audience: Vec<String>,
-    /// Expected authorized parties (`azp` claim). Empty = skip validation.
+    /// Expected authorized parties (`azp` claim). Declarative only — map onto
+    /// [`JwtAuthConfig::authorized_parties`](crate::server::JwtAuthConfig) to
+    /// have it enforced; setting it here alone checks nothing.
     #[serde(default)]
     pub authorized_parties: Vec<String>,
     /// Allowed JWT signing algorithms. Defaults to `["RS256"]`.

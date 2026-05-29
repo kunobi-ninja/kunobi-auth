@@ -109,9 +109,12 @@ fn extract_bearer_token(parts: &Parts) -> Result<&str, AuthError> {
         .and_then(|v| v.to_str().ok())
         .ok_or_else(|| AuthError::Unauthorized("Missing Authorization header".into()))?;
 
-    header
-        .strip_prefix("Bearer ")
-        .ok_or_else(|| AuthError::Unauthorized("Expected Bearer token".into()))
+    // Match `Bearer` case-insensitively (RFC 6750 §2.1). `get(..7)` avoids a
+    // panic when byte 7 falls inside a multibyte UTF-8 character.
+    match header.get(..7) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("Bearer ") => Ok(&header[7..]),
+        _ => Err(AuthError::Unauthorized("Expected Bearer token".into())),
+    }
 }
 
 #[cfg(test)]
@@ -185,6 +188,33 @@ mod tests {
 
         let result = RequiredAuth::from_request_parts(&mut parts, &TestState).await;
         assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn required_auth_multibyte_header_does_not_panic() {
+        // Multibyte UTF-8 in the first bytes must not panic the `..7` slice; it
+        // is simply not a Bearer token, so the extractor errors.
+        let req = Request::builder()
+            .header("Authorization", "€€€")
+            .body(())
+            .unwrap();
+        let (mut parts, _) = req.into_parts();
+
+        let result = RequiredAuth::from_request_parts(&mut parts, &TestState).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn required_auth_lowercase_bearer_scheme_accepted() {
+        // RFC 6750 §2.1: the scheme is case-insensitive.
+        let req = Request::builder()
+            .header("Authorization", "bearer valid-token")
+            .body(())
+            .unwrap();
+        let (mut parts, _) = req.into_parts();
+
+        let result = RequiredAuth::from_request_parts(&mut parts, &TestState).await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]
