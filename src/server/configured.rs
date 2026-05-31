@@ -38,6 +38,10 @@ pub struct JwtAuthConfig {
     pub audience: Vec<String>,
     pub algorithms: Vec<String>,
     pub identity_claim: String,
+    /// Accepted `azp` (authorized party) values. When non-empty, the validated
+    /// token's `azp` claim must be present and match one of these; empty means
+    /// `azp` is not checked.
+    pub authorized_parties: Vec<String>,
 }
 
 /// Static Bearer token config.
@@ -114,11 +118,19 @@ impl JwtAuthConfig {
             audience,
             algorithms: vec!["RS256".into()],
             identity_claim: "sub".into(),
+            authorized_parties: Vec::new(),
         }
     }
 
     pub fn algorithms(mut self, algorithms: Vec<String>) -> Self {
         self.algorithms = algorithms;
+        self
+    }
+
+    /// Restrict accepted tokens to those whose `azp` claim is one of
+    /// `parties`. With no call (or an empty vec), `azp` is not checked.
+    pub fn authorized_parties(mut self, parties: Vec<String>) -> Self {
+        self.authorized_parties = parties;
         self
     }
 
@@ -199,6 +211,19 @@ impl AuthnProvider for ConfiguredAuth {
                 Ok(claims) => claims,
                 Err(_) => continue,
             };
+
+            // Enforce `azp` (authorized party) when configured. The token has
+            // already validated against this provider's issuer + audience, so a
+            // mismatch here is a hard rejection rather than a fall-through.
+            if !config.authorized_parties.is_empty() {
+                let azp = claims.get("azp").and_then(|v| v.as_str());
+                let allowed = azp.is_some_and(|p| config.authorized_parties.iter().any(|a| a == p));
+                if !allowed {
+                    return Err(AuthError::Unauthorized(format!(
+                        "JWT azp {azp:?} is not an authorized party"
+                    )));
+                }
+            }
 
             let identity = claims
                 .get(&config.identity_claim)
@@ -290,5 +315,55 @@ mod tests {
         assert!(token_matches("secret", "secret"));
         assert!(!token_matches("secret", "secrex"));
         assert!(!token_matches("secret", "secret-extra"));
+    }
+
+    #[test]
+    fn oidc_config_has_no_authorized_parties_by_default() {
+        let config = JwtAuthConfig::oidc("p", "https://i", "https://i/jwks", vec!["aud".into()]);
+        assert!(config.authorized_parties.is_empty());
+    }
+
+    #[test]
+    fn authorized_parties_builder_sets_the_list() {
+        let config = JwtAuthConfig::oidc("p", "https://i", "https://i/jwks", vec!["aud".into()])
+            .authorized_parties(vec!["cli".into(), "web".into()]);
+        assert_eq!(config.authorized_parties, vec!["cli", "web"]);
+    }
+
+    /// Pure check mirroring the `azp` gate in `authenticate`, so the policy is
+    /// exercised without needing a live JWKS endpoint.
+    fn azp_allowed(authorized: &[String], claims: &HashMap<String, Value>) -> bool {
+        if authorized.is_empty() {
+            return true;
+        }
+        let azp = claims.get("azp").and_then(|v| v.as_str());
+        azp.is_some_and(|p| authorized.iter().any(|a| a == p))
+    }
+
+    #[test]
+    fn azp_gate_accepts_listed_party() {
+        let authorized = vec!["cli".to_string()];
+        let mut claims = HashMap::new();
+        claims.insert("azp".to_string(), Value::from("cli"));
+        assert!(azp_allowed(&authorized, &claims));
+    }
+
+    #[test]
+    fn azp_gate_rejects_unlisted_or_missing_party() {
+        let authorized = vec!["cli".to_string()];
+
+        let mut other = HashMap::new();
+        other.insert("azp".to_string(), Value::from("attacker"));
+        assert!(!azp_allowed(&authorized, &other));
+
+        let missing: HashMap<String, Value> = HashMap::new();
+        assert!(!azp_allowed(&authorized, &missing));
+    }
+
+    #[test]
+    fn azp_gate_disabled_when_unset() {
+        let authorized: Vec<String> = Vec::new();
+        let missing: HashMap<String, Value> = HashMap::new();
+        assert!(azp_allowed(&authorized, &missing));
     }
 }

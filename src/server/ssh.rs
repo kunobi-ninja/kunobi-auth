@@ -162,6 +162,19 @@ pub fn split_header_params(header: &str) -> Vec<String> {
 /// at default `MAX_FUTURE_CLOCK_SKEW`). Set `max_age >= max_drift` to be
 /// safe; setting `max_age` shorter creates a window where drift still
 /// passes but the nonce has been forgotten -- a replay primitive.
+///
+/// **Call ordering (important)**: verify the signature with
+/// [`verify_ssh_signature`] *first*, and only call [`Self::check_and_insert`]
+/// once the signature is known-good. Consuming a nonce slot before
+/// authenticating lets an unauthenticated client flood the tracker with junk
+/// nonces and trip the capacity limit (see below) — turning replay protection
+/// into a denial-of-service primitive. Authenticate, then record.
+///
+/// **Capacity**: the tracker holds at most `max_entries` live nonces (default
+/// 4096 via [`NonceTracker::new`]); once full, *new* nonces are rejected until
+/// entries age out. Size `max_entries` for your peak rate of distinct
+/// authenticated callers within `max_age`, and keep `max_age` as tight as the
+/// drift contract allows so slots free up quickly.
 pub struct NonceTracker {
     seen: RwLock<HashMap<String, Instant>>,
     max_age: Duration,
@@ -472,6 +485,55 @@ pub fn verify_ssh_signature(
         comment: parsed_key.comment.clone(),
         identity,
     })
+}
+
+/// Verify an SSH signature *and* atomically consume its nonce for replay
+/// protection, in the only safe order.
+///
+/// This wraps [`verify_ssh_signature`] + [`NonceTracker::check_and_insert`] so
+/// the contract documented on [`NonceTracker`] is enforced by construction: the
+/// signature is fully verified **first**, and a nonce slot is consumed **only
+/// after** the request is known-authentic. That ordering is what prevents an
+/// unauthenticated client from flooding the tracker to capacity and denying
+/// service to legitimate callers — prefer this over calling the two pieces
+/// yourself.
+///
+/// Returns the verified identity on success; `AuthError::Unauthorized` if the
+/// signature is invalid or the nonce has already been seen (replay).
+// Mirrors `verify_ssh_signature`'s positional parameters and adds the nonce
+// tracker; keeping the same call shape is clearer than introducing a one-off
+// request struct for a single extra argument.
+#[allow(clippy::too_many_arguments)]
+pub async fn verify_ssh_signature_checked(
+    header: &SshSignatureHeader,
+    namespace: &str,
+    method: &str,
+    path_with_query: &str,
+    body: &[u8],
+    providers: &[CompiledSshProvider],
+    max_drift: Duration,
+    nonce_tracker: &NonceTracker,
+) -> Result<VerifiedSshIdentity, AuthError> {
+    // 1. Prove the request is authentic (signature, drift, revocation, …).
+    let identity = verify_ssh_signature(
+        header,
+        namespace,
+        method,
+        path_with_query,
+        body,
+        providers,
+        max_drift,
+    )?;
+
+    // 2. Only now consume a nonce slot. Doing this before step 1 would let an
+    //    unauthenticated flood exhaust the tracker (see `NonceTracker` docs).
+    if nonce_tracker.check_and_insert(&header.nonce).await {
+        return Err(AuthError::Unauthorized(
+            "SSH request nonce was already used (replay) or is invalid".into(),
+        ));
+    }
+
+    Ok(identity)
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -1254,6 +1316,138 @@ mod tests {
             msg.contains("SHA256:"),
             "redacted form should keep prefix: {msg}"
         );
+    }
+
+    #[tokio::test]
+    async fn checked_verify_succeeds_then_rejects_replay() {
+        use rand_core::OsRng;
+        let private_key = ssh_key::PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let public_key = private_key.public_key().clone();
+        let fingerprint = public_key.fingerprint(HashAlg::Sha256).to_string();
+        let comment = public_key.comment().to_string();
+        let parsed = ParsedAuthorizedKey {
+            fingerprint: fingerprint.clone(),
+            public_key,
+            comment,
+        };
+        let provider = CompiledSshProvider {
+            name: "svc".into(),
+            keys: vec![parsed],
+            revoked_fingerprints: HashSet::new(),
+            identity_template: "{fingerprint}".into(),
+        };
+
+        let now_ts = current_unix_ts();
+        let message = build_signed_message(&now_ts, "nonce-xyz", "GET", "/", &[]);
+        let sshsig = private_key
+            .sign("svc-ns", HashAlg::Sha512, &message)
+            .unwrap();
+        let sig_b64 = encode_sshsig(&sshsig);
+        let header_str = format!(
+            r#"fingerprint="{fingerprint}",timestamp="{now_ts}",nonce="nonce-xyz",signature="{sig_b64}""#
+        );
+        let header = parse_ssh_auth_header(&header_str).unwrap();
+
+        let tracker = NonceTracker::new(Duration::from_secs(60));
+
+        // First presentation: authentic + fresh nonce -> accepted.
+        verify_ssh_signature_checked(
+            &header,
+            "svc-ns",
+            "GET",
+            "/",
+            &[],
+            std::slice::from_ref(&provider),
+            Duration::from_secs(300),
+            &tracker,
+        )
+        .await
+        .expect("first use must succeed");
+
+        // Replaying the exact same request -> nonce already seen -> rejected.
+        let err = verify_ssh_signature_checked(
+            &header,
+            "svc-ns",
+            "GET",
+            "/",
+            &[],
+            std::slice::from_ref(&provider),
+            Duration::from_secs(300),
+            &tracker,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AuthError::Unauthorized(_)));
+    }
+
+    /// A request with a bad signature must be rejected *and* must not consume a
+    /// nonce slot — otherwise an unauthenticated client could exhaust the
+    /// tracker. After the failed attempt, the same nonce is still usable by a
+    /// genuinely-signed request.
+    #[tokio::test]
+    async fn checked_verify_does_not_consume_nonce_on_bad_signature() {
+        use rand_core::OsRng;
+        let private_key = ssh_key::PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
+        let public_key = private_key.public_key().clone();
+        let fingerprint = public_key.fingerprint(HashAlg::Sha256).to_string();
+        let comment = public_key.comment().to_string();
+        let parsed = ParsedAuthorizedKey {
+            fingerprint: fingerprint.clone(),
+            public_key,
+            comment,
+        };
+        let provider = CompiledSshProvider {
+            name: "svc".into(),
+            keys: vec![parsed],
+            revoked_fingerprints: HashSet::new(),
+            identity_template: "{fingerprint}".into(),
+        };
+
+        let tracker = NonceTracker::new(Duration::from_secs(60));
+        let now_ts = current_unix_ts();
+
+        // Garbage signature bytes over the right fingerprint/nonce.
+        let bogus_sig = B64.encode(b"not a real sshsig");
+        let bad_header_str = format!(
+            r#"fingerprint="{fingerprint}",timestamp="{now_ts}",nonce="shared-nonce",signature="{bogus_sig}""#
+        );
+        let bad_header = parse_ssh_auth_header(&bad_header_str).unwrap();
+        let err = verify_ssh_signature_checked(
+            &bad_header,
+            "svc-ns",
+            "GET",
+            "/",
+            &[],
+            std::slice::from_ref(&provider),
+            Duration::from_secs(300),
+            &tracker,
+        )
+        .await
+        .unwrap_err();
+        assert!(matches!(err, AuthError::Unauthorized(_)));
+
+        // The same nonce must still be accepted for a properly-signed request.
+        let message = build_signed_message(&now_ts, "shared-nonce", "GET", "/", &[]);
+        let sshsig = private_key
+            .sign("svc-ns", HashAlg::Sha512, &message)
+            .unwrap();
+        let sig_b64 = encode_sshsig(&sshsig);
+        let good_header_str = format!(
+            r#"fingerprint="{fingerprint}",timestamp="{now_ts}",nonce="shared-nonce",signature="{sig_b64}""#
+        );
+        let good_header = parse_ssh_auth_header(&good_header_str).unwrap();
+        verify_ssh_signature_checked(
+            &good_header,
+            "svc-ns",
+            "GET",
+            "/",
+            &[],
+            std::slice::from_ref(&provider),
+            Duration::from_secs(300),
+            &tracker,
+        )
+        .await
+        .expect("a failed signature must not have burned the nonce");
     }
 
     // ── Test helpers ─────────────────────────────────────────────────────────

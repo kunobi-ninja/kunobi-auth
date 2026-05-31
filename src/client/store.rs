@@ -93,12 +93,13 @@ impl TokenStore {
     }
 
     fn token_path(&self, issuer: &str) -> PathBuf {
-        // Hash the issuer URL to create a safe filename
-        use std::collections::hash_map::DefaultHasher;
-        use std::hash::{Hash, Hasher};
-        let mut hasher = DefaultHasher::new();
-        issuer.hash(&mut hasher);
-        self.dir.join(format!("{:x}.json", hasher.finish()))
+        // Hash the issuer URL to a safe, collision-resistant filename. SHA-256
+        // is used (rather than `DefaultHasher`) because its output is stable
+        // across Rust toolchain versions -- `DefaultHasher`'s is not, which
+        // would silently orphan stored tokens after an upgrade.
+        use sha2::{Digest, Sha256};
+        let digest = Sha256::digest(issuer.as_bytes());
+        self.dir.join(format!("{}.json", hex::encode(digest)))
     }
 }
 

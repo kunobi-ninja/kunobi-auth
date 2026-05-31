@@ -177,11 +177,20 @@ where
 /// Reads the first `Authorization` header. See `middleware::extract_bearer_token`
 /// for the reasoning -- multiple `Authorization` headers are forbidden by
 /// RFC 7230 §3.2.2; we don't try to merge them.
+///
+/// The `Bearer` scheme is matched case-insensitively per RFC 6750 §2.1.
+/// `header.get(..7)` never panics on a non-char-boundary the way `[..7]` would.
 fn extract_bearer<B>(req: &Request<B>) -> Option<&str> {
-    req.headers()
+    let header = req
+        .headers()
         .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .and_then(|h| h.strip_prefix("Bearer "))
+        .and_then(|v| v.to_str().ok())?;
+    let prefix = header.get(..7)?;
+    if prefix.eq_ignore_ascii_case("Bearer ") {
+        Some(&header[7..])
+    } else {
+        None
+    }
 }
 
 #[cfg(test)]

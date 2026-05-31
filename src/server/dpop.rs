@@ -33,7 +33,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use base64::Engine as _;
 use base64::engine::general_purpose::URL_SAFE_NO_PAD as B64;
-use jsonwebtoken::jwk::{AlgorithmParameters, Jwk};
+use jsonwebtoken::jwk::{AlgorithmParameters, EllipticCurve, Jwk};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
@@ -140,7 +140,9 @@ pub fn verify_dpop_proof(
             ));
         }
     };
-    if format!("{:?}", ec.curve) != "P256" {
+    // ES256 implies P-256; match the enum variant directly rather than relying
+    // on the `Debug` representation of the curve.
+    if !matches!(ec.curve, EllipticCurve::P256) {
         return Err(AuthError::Unauthorized(format!(
             "DPoP proof jwk curve must be P-256, got {:?}",
             ec.curve
