@@ -24,4 +24,5 @@ pub use middleware::{AuthnProvider, OptionalAuth, RequiredAuth};
 pub use ssh::{
     CompiledSshProvider, NonceTracker, ParsedAuthorizedKey, SshSignatureHeader,
     build_signed_message, parse_ssh_auth_header, verify_ssh_signature,
+    verify_ssh_signature_checked,
 };
