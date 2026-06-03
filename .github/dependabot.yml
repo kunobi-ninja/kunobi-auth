@@ -7,6 +7,16 @@ updates:
       interval: "weekly"
     allow:
       - dependency-type: "all"
+    ignore:
+      # `ssh-encoding` is an implementation detail of `ssh-key`; the two must
+      # move as a pair. Stable `ssh-key` (0.6.x) is pinned to `ssh-encoding`
+      # 0.2, and `ssh-encoding` 0.3 only pairs with the `ssh-key` 0.7 RC line.
+      # Bumping `ssh-encoding` to 0.3 on its own breaks the build (the 0.3
+      # Encode/Decode traits don't match the 0.2 traits `ssh-key` implements).
+      # Hold at 0.2 until `ssh-key` 0.7 ships stable, then bump both together
+      # and drop this ignore.
+      - dependency-name: "ssh-encoding"
+        update-types: ["version-update:semver-minor", "version-update:semver-major"]
     groups:
       all-cargo:
         patterns:
