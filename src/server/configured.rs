@@ -5,8 +5,8 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::common::{AuthError, AuthIdentity};
-use crate::server::{AuthnProvider, JwksManager};
+use crate::common::{AuthError, AuthIdentity, secret_eq};
+use crate::server::{AuthnProvider, JwksManager, verify_azp};
 
 /// Builder for common server-side auth configuration.
 ///
@@ -179,7 +179,7 @@ impl fmt::Debug for StaticTokenConfig {
 impl AuthnProvider for ConfiguredAuth {
     async fn authenticate(&self, token: &str) -> Result<AuthIdentity, AuthError> {
         for config in self.static_tokens.iter() {
-            if token_matches(&config.token, token) {
+            if secret_eq(&config.token, token) {
                 return Ok(AuthIdentity {
                     provider: config.provider.clone(),
                     identity: config.identity.clone(),
@@ -215,15 +215,8 @@ impl AuthnProvider for ConfiguredAuth {
             // Enforce `azp` (authorized party) when configured. The token has
             // already validated against this provider's issuer + audience, so a
             // mismatch here is a hard rejection rather than a fall-through.
-            if !config.authorized_parties.is_empty() {
-                let azp = claims.get("azp").and_then(|v| v.as_str());
-                let allowed = azp.is_some_and(|p| config.authorized_parties.iter().any(|a| a == p));
-                if !allowed {
-                    return Err(AuthError::Unauthorized(format!(
-                        "JWT azp {azp:?} is not an authorized party"
-                    )));
-                }
-            }
+            verify_azp(&claims, &config.authorized_parties)
+                .map_err(|e| AuthError::Unauthorized(e.to_string()))?;
 
             let identity = claims
                 .get(&config.identity_claim)
@@ -246,19 +239,6 @@ impl AuthnProvider for ConfiguredAuth {
 
         Err(AuthError::Unauthorized("invalid bearer token".into()))
     }
-}
-
-fn token_matches(expected: &str, presented: &str) -> bool {
-    if expected.len() != presented.len() {
-        return false;
-    }
-
-    expected
-        .as_bytes()
-        .iter()
-        .zip(presented.as_bytes())
-        .fold(0u8, |acc, (a, b)| acc | (a ^ b))
-        == 0
 }
 
 #[cfg(test)]
@@ -312,9 +292,9 @@ mod tests {
 
     #[test]
     fn token_match_rejects_different_values() {
-        assert!(token_matches("secret", "secret"));
-        assert!(!token_matches("secret", "secrex"));
-        assert!(!token_matches("secret", "secret-extra"));
+        assert!(secret_eq("secret", "secret"));
+        assert!(!secret_eq("secret", "secrex"));
+        assert!(!secret_eq("secret", "secret-extra"));
     }
 
     #[test]

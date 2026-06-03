@@ -232,6 +232,30 @@ impl Default for JwksManager {
     }
 }
 
+/// Enforce the `azp` (authorized party) claim against an allow-list.
+///
+/// An empty `authorized_parties` means no constraint (returns `Ok`). Otherwise
+/// the token must carry an `azp` claim whose value is in the list; a value not
+/// in the list, or a missing `azp` claim, is rejected.
+///
+/// Apply this after [`JwksManager::validate_jwt`] on the returned claims to
+/// honor an OIDC provider's `authorizedParties` configuration when validating
+/// against a dynamically-selected provider (the static [`super::ConfiguredAuth`]
+/// path applies it for you).
+pub fn verify_azp(
+    claims: &HashMap<String, serde_json::Value>,
+    authorized_parties: &[String],
+) -> Result<()> {
+    if authorized_parties.is_empty() {
+        return Ok(());
+    }
+    match claims.get("azp").and_then(|v| v.as_str()) {
+        Some(azp) if authorized_parties.iter().any(|p| p == azp) => Ok(()),
+        Some(azp) => anyhow::bail!("unauthorized azp: {azp}"),
+        None => anyhow::bail!("missing azp claim (authorizedParties is configured)"),
+    }
+}
+
 /// Pure predicate for the validation-cache hit check. Extracted from
 /// [`JwksManager::validate_jwt`] so the comparison is exercised directly
 /// by unit tests -- mutation operators (`>` -> `<`, `>=`, `==`) are pinned
@@ -975,5 +999,37 @@ mod tests {
         // age == JWKS_CACHE_TTL: `<` says fresh=false (boundary is half-open),
         // so we refetch. Kills `<` -> `<=` (would say still-fresh).
         assert!(!jwks_cache_should_be_used(JWKS_CACHE_TTL, true));
+    }
+
+    fn claims_with_azp(azp: Option<&str>) -> HashMap<String, serde_json::Value> {
+        let mut m = HashMap::new();
+        if let Some(azp) = azp {
+            m.insert("azp".to_string(), serde_json::Value::from(azp));
+        }
+        m
+    }
+
+    #[test]
+    fn verify_azp_skips_when_allow_list_empty() {
+        assert!(verify_azp(&claims_with_azp(None), &[]).is_ok());
+        assert!(verify_azp(&claims_with_azp(Some("anything")), &[]).is_ok());
+    }
+
+    #[test]
+    fn verify_azp_accepts_listed_party() {
+        let allowed = vec!["cli".to_string(), "web".to_string()];
+        assert!(verify_azp(&claims_with_azp(Some("web")), &allowed).is_ok());
+    }
+
+    #[test]
+    fn verify_azp_rejects_unlisted_party() {
+        let allowed = vec!["cli".to_string()];
+        assert!(verify_azp(&claims_with_azp(Some("attacker")), &allowed).is_err());
+    }
+
+    #[test]
+    fn verify_azp_rejects_missing_claim_when_required() {
+        let allowed = vec!["cli".to_string()];
+        assert!(verify_azp(&claims_with_azp(None), &allowed).is_err());
     }
 }
