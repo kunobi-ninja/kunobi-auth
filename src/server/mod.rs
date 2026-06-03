@@ -11,7 +11,7 @@ pub mod ssh;
 pub use audit::{AuditLog, StdoutAuditLog};
 pub use configured::{AuthBuilder, ConfiguredAuth, JwtAuthConfig, StaticTokenConfig};
 pub use dpop::{DpopProof, ath_for, cnf_jkt, jkt_thumbprint, verify_dpop_proof};
-pub use jwks::JwksManager;
+pub use jwks::{JwksManager, verify_azp};
 pub use layer::{AuthLayer, AuthService};
 #[cfg(feature = "mcp-server")]
 pub use mcp::{
