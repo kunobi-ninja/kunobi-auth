@@ -6,7 +6,7 @@ use std::time::Duration;
 use serde_json::Value;
 
 use crate::common::{AuthError, AuthIdentity, secret_eq};
-use crate::server::{AuthnProvider, JwksManager, verify_azp};
+use crate::server::{AuthnProvider, JwksManager};
 
 /// Builder for common server-side auth configuration.
 ///
@@ -190,20 +190,25 @@ impl AuthnProvider for ConfiguredAuth {
         }
 
         for config in self.jwt.iter() {
-            if config.audience.is_empty() {
+            // A provider must bind tokens by audience or azp; both empty would
+            // accept any signed token from the issuer.
+            if config.audience.is_empty() && config.authorized_parties.is_empty() {
                 return Err(AuthError::Internal(format!(
-                    "JWT auth provider {} has no audience configured",
+                    "JWT auth provider {} has neither audience nor authorizedParties configured",
                     config.provider
                 )));
             }
 
+            // `validate_jwt_bound` enforces the audience and/or azp binding
+            // (whichever is set), so no separate azp check is needed here.
             let claims = match self
                 .jwks
-                .validate_jwt(
+                .validate_jwt_bound(
                     token,
                     &config.jwks_url,
                     &config.issuer,
                     &config.audience,
+                    &config.authorized_parties,
                     &config.algorithms,
                 )
                 .await
@@ -211,12 +216,6 @@ impl AuthnProvider for ConfiguredAuth {
                 Ok(claims) => claims,
                 Err(_) => continue,
             };
-
-            // Enforce `azp` (authorized party) when configured. The token has
-            // already validated against this provider's issuer + audience, so a
-            // mismatch here is a hard rejection rather than a fall-through.
-            verify_azp(&claims, &config.authorized_parties)
-                .map_err(|e| AuthError::Unauthorized(e.to_string()))?;
 
             let identity = claims
                 .get(&config.identity_claim)

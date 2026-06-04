@@ -108,7 +108,9 @@ impl JwksManager {
     /// Validate a JWT and return its claims.
     ///
     /// Both `issuer` and `audience` are required and validated against the `iss`
-    /// / `aud` claims. Pass at least one audience.
+    /// / `aud` claims. Pass at least one audience. For providers that bind tokens
+    /// via `azp` instead of `aud` (e.g. some OIDC session tokens), use
+    /// [`JwksManager::validate_jwt_bound`].
     pub async fn validate_jwt(
         &self,
         token: &str,
@@ -117,55 +119,96 @@ impl JwksManager {
         audience: &[String],
         algorithms: &[String],
     ) -> Result<HashMap<String, serde_json::Value>> {
+        self.validate_jwt_bound(token, jwks_url, issuer, audience, &[], algorithms)
+            .await
+    }
+
+    /// Validate a JWT bound by audience **or** authorized party (`azp`).
+    ///
+    /// `issuer` is always required. At least one of `audience` or
+    /// `authorized_parties` must be non-empty — refusing both prevents accepting
+    /// any validly-signed token from a shared issuer (token confusion). When
+    /// `audience` is set it is validated against `aud`; when `authorized_parties`
+    /// is set the token's `azp` claim must match one of them (see [`verify_azp`]).
+    ///
+    /// `azp` is enforced on every call (including validation-cache hits), since
+    /// the cache key is keyed on the token + audience, not the azp allow-list.
+    pub async fn validate_jwt_bound(
+        &self,
+        token: &str,
+        jwks_url: &str,
+        issuer: &str,
+        audience: &[String],
+        authorized_parties: &[String],
+        algorithms: &[String],
+    ) -> Result<HashMap<String, serde_json::Value>> {
         if issuer.is_empty() {
             anyhow::bail!("issuer must be set; refusing to validate JWT without issuer binding");
         }
-        if audience.is_empty() {
+        if audience.is_empty() && authorized_parties.is_empty() {
             anyhow::bail!(
-                "audience must be set; refusing to validate JWT without audience binding"
+                "refusing to validate JWT without binding: set at least one of audience or authorized_parties"
             );
         }
 
         let cache_key = validation_cache_key(token, jwks_url, issuer, audience, algorithms);
 
-        // Fast path: cache hit for this exact token + validation context.
-        if let Some(cache) = &self.validation_cache {
+        // Fast path: cache hit for this exact token + validation context. The
+        // signature/aud/exp checks are cached, but azp is re-checked below since
+        // the cache key does not include the azp allow-list.
+        let cached = if let Some(cache) = &self.validation_cache {
             let now = Instant::now();
             let entries = cache.entries.read().await;
-            if let Some(hit) = entries.get(&cache_key)
-                && cache_entry_is_fresh(hit.valid_until, now)
-            {
-                return Ok(hit.claims.clone());
+            entries
+                .get(&cache_key)
+                .filter(|hit| cache_entry_is_fresh(hit.valid_until, now))
+                .map(|hit| hit.claims.clone())
+        } else {
+            None
+        };
+
+        let claims = if let Some(claims) = cached {
+            claims
+        } else {
+            let header = decode_header(token).context("Invalid JWT header")?;
+            let kid = header.kid.as_deref();
+            let allowed_algorithms = parse_algorithms(algorithms)?;
+            if !allowed_algorithms.contains(&header.alg) {
+                anyhow::bail!("JWT algorithm {:?} is not allowed", header.alg);
             }
-        }
 
-        let header = decode_header(token).context("Invalid JWT header")?;
-        let kid = header.kid.as_deref();
-        let allowed_algorithms = parse_algorithms(algorithms)?;
-        if !allowed_algorithms.contains(&header.alg) {
-            anyhow::bail!("JWT algorithm {:?} is not allowed", header.alg);
-        }
+            let keys = self.get_keys(jwks_url, kid).await?;
+            let key = find_matching_key(&keys, kid)?;
 
-        let keys = self.get_keys(jwks_url, kid).await?;
-        let key = find_matching_key(&keys, kid)?;
+            let mut validation = Validation::new(header.alg);
+            if audience.is_empty() {
+                // Bound by azp instead of aud; do not require/validate `aud`.
+                validation.validate_aud = false;
+            } else {
+                validation.set_audience(audience);
+            }
+            validation.set_issuer(&[issuer]);
+            validation.validate_exp = true;
+            validation.validate_nbf = true;
 
-        let mut validation = Validation::new(header.alg);
-        validation.set_audience(audience);
-        validation.set_issuer(&[issuer]);
-        validation.validate_exp = true;
-        validation.validate_nbf = true;
+            let decoding_key = build_decoding_key(key)?;
+            let token_data =
+                decode::<HashMap<String, serde_json::Value>>(token, &decoding_key, &validation)
+                    .context("JWT validation failed")?;
 
-        let decoding_key = build_decoding_key(key)?;
-        let token_data =
-            decode::<HashMap<String, serde_json::Value>>(token, &decoding_key, &validation)
-                .context("JWT validation failed")?;
+            // Populate the validation cache, capping TTL by token.exp.
+            if let Some(cache) = &self.validation_cache {
+                insert_validated(cache, cache_key, &token_data.claims).await;
+            }
 
-        // Populate the validation cache, capping TTL by token.exp.
-        if let Some(cache) = &self.validation_cache {
-            insert_validated(cache, cache_key, &token_data.claims).await;
-        }
+            token_data.claims
+        };
 
-        Ok(token_data.claims)
+        // Enforce azp binding (no-op when `authorized_parties` is empty) on both
+        // fresh and cached claims.
+        verify_azp(&claims, authorized_parties)?;
+
+        Ok(claims)
     }
 
     /// Fetch JWKS keys, optionally forcing a refetch when `wanted_kid` isn't in
@@ -773,6 +816,36 @@ mod tests {
         let mgr = JwksManager::new();
         let err = mgr
             .validate_jwt("token", "https://x/jwks", "", &["aud".to_string()], &[])
+            .await
+            .unwrap_err();
+        assert!(err.to_string().contains("issuer"));
+    }
+
+    #[tokio::test]
+    async fn test_validate_jwt_bound_rejects_when_aud_and_azp_both_empty() {
+        let mgr = JwksManager::new();
+        let err = mgr
+            .validate_jwt_bound("token", "https://x/jwks", "https://issuer", &[], &[], &[])
+            .await
+            .unwrap_err();
+        assert!(
+            err.to_string()
+                .contains("at least one of audience or authorized_parties")
+        );
+    }
+
+    #[tokio::test]
+    async fn test_validate_jwt_bound_still_requires_issuer() {
+        let mgr = JwksManager::new();
+        let err = mgr
+            .validate_jwt_bound(
+                "token",
+                "https://x/jwks",
+                "",
+                &[],
+                &["cli".to_string()],
+                &[],
+            )
             .await
             .unwrap_err();
         assert!(err.to_string().contains("issuer"));
