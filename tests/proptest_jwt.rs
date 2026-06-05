@@ -14,6 +14,10 @@
 //!      the expected outcome.
 //!
 //! Run with `cargo test --test proptest_jwt --all-features`.
+//!
+//! Gated on the `server` feature: the test harness uses `axum` to serve the
+//! mock JWKS endpoint, and `axum` is only present when `server` is enabled.
+#![cfg(feature = "server")]
 
 use axum::Router;
 use axum::routing::get;

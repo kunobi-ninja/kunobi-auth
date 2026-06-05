@@ -34,6 +34,25 @@ struct Jwk {
     y: Option<String>,
     #[allow(dead_code)]
     crv: Option<String>,
+    /// Intended use ("sig" / "enc"). Absent means unrestricted.
+    #[serde(rename = "use")]
+    use_: Option<String>,
+    /// Allowed key operations (e.g. "verify"). Absent means unrestricted.
+    key_ops: Option<Vec<String>>,
+}
+
+impl Jwk {
+    /// Whether this key may be used to verify signatures. Per RFC 7517 a key
+    /// with `use: "enc"` (or `key_ops` lacking "verify") must NOT be used for
+    /// signature verification, even if its `kid` matches.
+    fn is_signing_key(&self) -> bool {
+        let use_ok = self.use_.as_deref().is_none_or(|u| u == "sig");
+        let ops_ok = self
+            .key_ops
+            .as_ref()
+            .is_none_or(|ops| ops.iter().any(|o| o == "verify"));
+        use_ok && ops_ok
+    }
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -75,6 +94,10 @@ impl JwksManager {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(10))
+            // Never follow redirects when fetching JWKS: the URL is already
+            // HTTPS-validated, and following a redirect could be steered to an
+            // attacker-controlled host (SSRF / key substitution).
+            .redirect(reqwest::redirect::Policy::none())
             .build()
             .expect("Failed to build HTTP client");
         Self {
@@ -181,11 +204,17 @@ impl JwksManager {
             let key = find_matching_key(&keys, kid)?;
 
             let mut validation = Validation::new(header.alg);
+            // jsonwebtoken only enforces a claim when present unless it is listed
+            // as required. Require `iss`/`exp` always; require `aud` only on the
+            // audience-bound path (azp-bound tokens legitimately omit `aud`), so
+            // a signed-but-claimless token cannot slip through.
             if audience.is_empty() {
                 // Bound by azp instead of aud; do not require/validate `aud`.
                 validation.validate_aud = false;
+                validation.set_required_spec_claims(&["exp", "iss"]);
             } else {
                 validation.set_audience(audience);
+                validation.set_required_spec_claims(&["exp", "aud", "iss"]);
             }
             validation.set_issuer(&[issuer]);
             validation.validate_exp = true;
@@ -421,12 +450,23 @@ async fn insert_validated(
 fn find_matching_key<'a>(keys: &'a [Jwk], kid: Option<&str>) -> Result<&'a Jwk> {
     if let Some(kid) = kid {
         keys.iter()
-            .find(|k| k.kid.as_deref() == Some(kid))
-            .ok_or_else(|| anyhow::anyhow!("No key found with kid: {kid}"))
+            .find(|k| k.kid.as_deref() == Some(kid) && k.is_signing_key())
+            .ok_or_else(|| anyhow::anyhow!("No signing key found with kid: {kid}"))
     } else {
-        keys.first()
-            .ok_or_else(|| anyhow::anyhow!("JWKS has no keys"))
+        keys.iter()
+            .find(|k| k.is_signing_key())
+            .ok_or_else(|| anyhow::anyhow!("JWKS has no usable signing key"))
     }
+}
+
+/// Derive the conventional OIDC JWKS URL for an issuer:
+/// `{issuer}/.well-known/jwks.json` (a trailing slash on `issuer` is handled).
+///
+/// This is the standard discovery location. If a provider advertises a
+/// non-standard `jwks_uri` in its OpenID configuration, pass that URL to
+/// [`JwksManager::validate_jwt`] directly instead.
+pub fn standard_jwks_url(issuer: &str) -> String {
+    format!("{}/.well-known/jwks.json", issuer.trim_end_matches('/'))
 }
 
 fn parse_algorithms(algorithms: &[String]) -> Result<Vec<Algorithm>> {
@@ -619,6 +659,8 @@ mod tests {
             x: None,
             y: None,
             crv: None,
+            use_: None,
+            key_ops: None,
         };
         let result = build_decoding_key(&jwk);
         assert!(result.is_ok());
@@ -634,6 +676,8 @@ mod tests {
             x: None,
             y: None,
             crv: None,
+            use_: None,
+            key_ops: None,
         };
         let result = build_decoding_key(&jwk);
         assert!(result.is_err());
@@ -650,6 +694,8 @@ mod tests {
             x: None,
             y: None,
             crv: None,
+            use_: None,
+            key_ops: None,
         };
         let result = build_decoding_key(&jwk);
         assert!(result.is_err());
@@ -666,6 +712,8 @@ mod tests {
             x: None,
             y: Some("y-val".to_string()),
             crv: Some("P-256".to_string()),
+            use_: None,
+            key_ops: None,
         };
         let result = build_decoding_key(&jwk);
         assert!(result.is_err());
@@ -682,6 +730,8 @@ mod tests {
             x: Some("x-val".to_string()),
             y: None,
             crv: Some("P-256".to_string()),
+            use_: None,
+            key_ops: None,
         };
         let result = build_decoding_key(&jwk);
         assert!(result.is_err());
@@ -698,6 +748,8 @@ mod tests {
             x: None,
             y: None,
             crv: Some("Ed25519".to_string()),
+            use_: None,
+            key_ops: None,
         };
         let result = build_decoding_key(&jwk);
         assert!(result.is_err());
@@ -714,6 +766,8 @@ mod tests {
             x: None,
             y: None,
             crv: None,
+            use_: None,
+            key_ops: None,
         };
         let result = build_decoding_key(&jwk);
         assert!(result.is_err());
@@ -737,6 +791,8 @@ mod tests {
                 x: None,
                 y: None,
                 crv: None,
+                use_: None,
+                key_ops: None,
             },
             Jwk {
                 kid: Some("key-2".to_string()),
@@ -746,6 +802,8 @@ mod tests {
                 x: None,
                 y: None,
                 crv: None,
+                use_: None,
+                key_ops: None,
             },
         ];
         let found = find_matching_key(&keys, Some("key-2")).unwrap();
@@ -763,6 +821,8 @@ mod tests {
             x: None,
             y: None,
             crv: None,
+            use_: None,
+            key_ops: None,
         }];
         let found = find_matching_key(&keys, None).unwrap();
         assert_eq!(found.kid.as_deref(), Some("only"));
@@ -785,10 +845,66 @@ mod tests {
             x: None,
             y: None,
             crv: None,
+            use_: None,
+            key_ops: None,
         }];
         let result = find_matching_key(&keys, Some("nonexistent"));
         assert!(result.is_err());
-        assert!(result.unwrap_err().to_string().contains("No key found"));
+        assert!(
+            result
+                .unwrap_err()
+                .to_string()
+                .contains("No signing key found")
+        );
+    }
+
+    fn rsa_key(kid: &str, use_: Option<&str>, key_ops: Option<Vec<&str>>) -> Jwk {
+        Jwk {
+            kid: Some(kid.to_string()),
+            kty: "RSA".to_string(),
+            n: None,
+            e: None,
+            x: None,
+            y: None,
+            crv: None,
+            use_: use_.map(String::from),
+            key_ops: key_ops.map(|v| v.into_iter().map(String::from).collect()),
+        }
+    }
+
+    #[test]
+    fn test_find_matching_key_rejects_enc_key() {
+        // A key whose `use` is "enc" must not be selected for verification,
+        // even when its kid matches.
+        let keys = vec![rsa_key("k", Some("enc"), None)];
+        assert!(find_matching_key(&keys, Some("k")).is_err());
+    }
+
+    #[test]
+    fn test_find_matching_key_rejects_non_verify_key_ops() {
+        let keys = vec![rsa_key("k", None, Some(vec!["encrypt"]))];
+        assert!(find_matching_key(&keys, Some("k")).is_err());
+    }
+
+    #[test]
+    fn test_find_matching_key_accepts_sig_key() {
+        let keys = vec![rsa_key("k", Some("sig"), Some(vec!["verify"]))];
+        assert!(find_matching_key(&keys, Some("k")).is_ok());
+        // Absent use/key_ops is unrestricted (accepted).
+        let keys2 = vec![rsa_key("k2", None, None)];
+        assert!(find_matching_key(&keys2, Some("k2")).is_ok());
+    }
+
+    #[test]
+    fn test_standard_jwks_url_handles_trailing_slash() {
+        assert_eq!(
+            standard_jwks_url("https://issuer.example.com"),
+            "https://issuer.example.com/.well-known/jwks.json"
+        );
+        assert_eq!(
+            standard_jwks_url("https://issuer.example.com/"),
+            "https://issuer.example.com/.well-known/jwks.json"
+        );
     }
 
     #[test]

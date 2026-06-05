@@ -1,6 +1,6 @@
 [package]
 name = "kunobi-auth"
-version = "0.7.0"
+version = "0.8.0"
 edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0"
@@ -10,21 +10,39 @@ keywords = ["oidc", "authentication", "jwt", "kubernetes", "operator"]
 categories = ["authentication", "web-programming"]
 
 [features]
-default = ["client", "server"]
-client = ["open", "dirs", "tempfile", "sysinfo"]
-server = []
+default = ["client", "browser-login", "server"]
+# Client token management: cached token store, refresh, revocation,
+# introspection, device-grant. Axum-free.
+client = ["dep:dirs", "dep:tempfile", "dep:sysinfo", "dep:openidconnect", "dep:oauth2"]
+# Interactive browser-based OIDC login (PKCE). Adds a localhost callback
+# server (axum) + a browser opener. Separable so client consumers that
+# drive their own login (e.g. desktop apps) avoid the axum dependency.
+browser-login = ["client", "dep:open", "dep:axum"]
+# Server-side axum integration: AuthLayer/tower, extractors, ConfiguredAuth,
+# and `AuthError: IntoResponse`. The JWKS/JWT validation core (JwksManager),
+# DPoP, SSH-signature verification, and audit log are available WITHOUT this.
+server = ["dep:axum", "dep:tower", "dep:http"]
 mcp-server = ["server"]
+# OS keychain-backed token storage (macOS Keychain / Windows Credential
+# Manager). Linux Secret Service can be added later via the keyring crate's
+# `sync-secret-service` feature.
+keyring = ["client", "dep:keyring"]
 
 [dependencies]
 # HTTP / Web
-axum = "0.8"
-reqwest = { version = "0.12", features = ["json", "rustls-tls"], default-features = false }
-tower = "0.5"
-http = "1"
+axum = { version = "0.8", optional = true }
+reqwest = { version = "0.13", features = ["json", "form", "rustls"], default-features = false }
+tower = { version = "0.5", optional = true }
+http = { version = "1", optional = true }
 
-# OIDC
-openidconnect = "4.0"
-oauth2 = "5.0"
+# OIDC (client)
+openidconnect = { version = "4.0", optional = true }
+oauth2 = { version = "5.0", optional = true }
+
+# OS keychain backend (optional `keyring` feature). Native backends only;
+# Linux Secret Service is intentionally left out for now (add
+# `sync-secret-service` when wiring Linux).
+keyring = { version = "3", optional = true, features = ["apple-native", "windows-native"] }
 
 # Async
 tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync", "time"] }

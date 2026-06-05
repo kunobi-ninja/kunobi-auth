@@ -99,7 +99,7 @@ let result = client.introspect().await?;
 if !result.active { /* revoked or expired at IdP */ }
 ```
 
-The synchronous `logout()` (local-only) stays for callers that don't want network on the logout path. Returns an error when the IdP doesn't advertise `revocation_endpoint` (Dex ≤ 2.41 does not implement RFC 7009; Keycloak/Okta/Auth0 do).
+The synchronous `logout()` is local-only — it removes the persisted token and never touches the network. Use `logout_async()` for RFC 7009 revocation at the IdP; it is best-effort, so an IdP that doesn't advertise a `revocation_endpoint` (Dex ≤ 2.41 doesn't implement RFC 7009; Keycloak/Okta/Auth0 do) is logged and the local removal still happens.
 
 ### SSH-key signed requests (recommended for service-to-service)
 

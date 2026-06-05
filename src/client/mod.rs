@@ -10,7 +10,9 @@ mod token;
 pub use config::ServiceConfig;
 pub use discovery::discover;
 pub use ssh::{SshAgentAuth, SshKeyInfo};
-pub use store::{StoredToken, TokenStore};
+#[cfg(feature = "keyring")]
+pub use store::KeyringStore;
+pub use store::{StoredToken, TokenStorage, TokenStore};
 pub use tofu::{TofuResult, TofuStore};
 pub use token::StaticTokenAuth;
 
@@ -29,23 +31,43 @@ pub enum TokenProvider {
 /// Handles token lifecycle: load cached -> refresh if expired -> browser login if needed.
 pub struct AuthClient {
     provider: TokenProvider,
-    store: TokenStore,
+    store: Box<dyn TokenStorage>,
 }
 
 impl AuthClient {
-    /// Create a new auth client with OIDC provider.
+    /// Create a new auth client with OIDC provider (default file-based token store).
     pub fn new(config: ServiceConfig) -> Result<Self> {
         Ok(Self {
             provider: TokenProvider::Oidc(config),
-            store: TokenStore::new()?,
+            store: Box::new(TokenStore::new()?),
         })
+    }
+
+    /// Create an OIDC auth client with a caller-supplied storage backend —
+    /// e.g. [`KeyringStore`] (with the `keyring` feature) or any custom
+    /// [`TokenStorage`] implementation.
+    pub fn with_storage(config: ServiceConfig, storage: Box<dyn TokenStorage>) -> Self {
+        Self {
+            provider: TokenProvider::Oidc(config),
+            store: storage,
+        }
+    }
+
+    /// Create an OIDC auth client that persists tokens in the OS keychain
+    /// (macOS Keychain / Windows Credential Manager).
+    #[cfg(feature = "keyring")]
+    pub fn new_with_keyring(config: ServiceConfig) -> Self {
+        Self {
+            provider: TokenProvider::Oidc(config),
+            store: Box::new(KeyringStore::new()),
+        }
     }
 
     /// Create a new auth client with a static token.
     pub fn with_static_token(token: String) -> Result<Self> {
         Ok(Self {
             provider: TokenProvider::Static(StaticTokenAuth::new(token)),
-            store: TokenStore::new()?,
+            store: Box::new(TokenStore::new()?),
         })
     }
 
@@ -56,7 +78,7 @@ impl AuthClient {
     pub fn with_ssh(fingerprint: Option<String>) -> Result<Self> {
         Ok(Self {
             provider: TokenProvider::Ssh(SshAgentAuth::new(fingerprint)),
-            store: TokenStore::new()?,
+            store: Box::new(TokenStore::new()?),
         })
     }
 
@@ -93,6 +115,7 @@ impl AuthClient {
     }
 
     /// Perform interactive login (always opens browser).
+    #[cfg(feature = "browser-login")]
     pub async fn login(&self) -> Result<StoredToken> {
         match &self.provider {
             TokenProvider::Static(_) => anyhow::bail!("Cannot login with static token"),
@@ -258,7 +281,9 @@ impl AuthClient {
                 )
                 .await
                 {
-                    Ok(refreshed) => {
+                    Ok(mut refreshed) => {
+                        // Carry application metadata forward across the refresh.
+                        refreshed.extra = stored.extra.clone();
                         self.store.save(&refreshed)?;
                         return Ok(refreshed.id_token);
                     }
@@ -272,7 +297,17 @@ impl AuthClient {
         }
 
         // No valid cached token / refresh failed -- interactive login.
-        let token = self.login().await?;
-        Ok(token.id_token)
+        #[cfg(feature = "browser-login")]
+        {
+            let token = self.login().await?;
+            Ok(token.id_token)
+        }
+        #[cfg(not(feature = "browser-login"))]
+        {
+            anyhow::bail!(
+                "no valid cached token and refresh unavailable; enable the \
+                 `browser-login` feature for interactive login"
+            )
+        }
     }
 }
