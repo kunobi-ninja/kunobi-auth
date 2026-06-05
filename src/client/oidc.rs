@@ -1,15 +1,24 @@
 use anyhow::{Context, Result};
+#[cfg(feature = "browser-login")]
 use axum::extract::Query;
+#[cfg(feature = "browser-login")]
 use axum::response::Html;
+#[cfg(feature = "browser-login")]
 use axum::routing::get;
-use openidconnect::core::{CoreAuthenticationFlow, CoreClient, CoreProviderMetadata};
+#[cfg(feature = "browser-login")]
+use openidconnect::core::CoreAuthenticationFlow;
+use openidconnect::core::{CoreClient, CoreProviderMetadata};
 use openidconnect::{
-    AuthorizationCode, ClientId, CsrfToken, IssuerUrl, Nonce, OAuth2TokenResponse,
-    PkceCodeChallenge, RedirectUrl, RefreshToken, Scope, TokenResponse,
+    ClientId, IssuerUrl, Nonce, OAuth2TokenResponse, RedirectUrl, RefreshToken, TokenResponse,
 };
+// Browser-login-only OIDC types (authorization-code flow + PKCE).
+#[cfg(feature = "browser-login")]
+use openidconnect::{AuthorizationCode, CsrfToken, PkceCodeChallenge, Scope};
 use serde::Deserialize;
+#[cfg(feature = "browser-login")]
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
+#[cfg(feature = "browser-login")]
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
@@ -31,6 +40,7 @@ fn build_http_client() -> Result<openidconnect::reqwest::Client> {
 /// 5. Exchanges the auth code for tokens
 /// 6. Validates the ID token (signature, expiry, aud, iss, nonce)
 /// 7. Returns the stored token
+#[cfg(feature = "browser-login")]
 pub async fn browser_login(
     issuer: &str,
     client_id: &str,
@@ -173,12 +183,12 @@ pub async fn browser_login(
     let refresh_token = token_response.refresh_token().map(|t| t.secret().clone());
     let expires_at = Some(claims.expiration().timestamp());
 
-    Ok(StoredToken {
-        id_token: id_token_str,
+    Ok(StoredToken::new(
+        id_token_str,
         refresh_token,
         expires_at,
-        issuer: claim_issuer,
-    })
+        claim_issuer,
+    ))
 }
 
 /// Refresh an OIDC session using the stored refresh token.
@@ -225,12 +235,12 @@ pub async fn refresh(
     let new_refresh = response.refresh_token().map(|t| t.secret().clone());
     let expires_at = Some(claims.expiration().timestamp());
 
-    Ok(StoredToken {
-        id_token: id_token_str,
-        refresh_token: new_refresh.or_else(|| Some(refresh_token.to_string())),
+    Ok(StoredToken::new(
+        id_token_str,
+        new_refresh.or_else(|| Some(refresh_token.to_string())),
         expires_at,
-        issuer: claim_issuer,
-    })
+        claim_issuer,
+    ))
 }
 
 // ──────────────────────────────────────────────────────────────────────────────
@@ -708,12 +718,12 @@ async fn finalize_device_token(
             .map(|s| chrono::Utc::now().timestamp() + s as i64)
     });
 
-    Ok(StoredToken {
+    Ok(StoredToken::new(
         id_token,
-        refresh_token: body.refresh_token,
+        body.refresh_token,
         expires_at,
-        issuer: claim_issuer,
-    })
+        claim_issuer,
+    ))
 }
 
 async fn fetch_discovery(issuer: &str) -> Result<DiscoveryDoc> {

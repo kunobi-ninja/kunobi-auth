@@ -1,4 +1,6 @@
+#[cfg(feature = "server")]
 use axum::http::StatusCode;
+#[cfg(feature = "server")]
 use axum::response::{IntoResponse, Response};
 
 #[derive(Debug, thiserror::Error)]
@@ -16,6 +18,7 @@ pub enum AuthError {
     Internal(String),
 }
 
+#[cfg(feature = "server")]
 impl IntoResponse for AuthError {
     fn into_response(self) -> Response {
         let (status, message) = match &self {
@@ -36,8 +39,8 @@ impl IntoResponse for AuthError {
     }
 }
 
-#[cfg(test)]
-mod tests {
+#[cfg(all(test, feature = "server"))]
+mod response_tests {
     use super::*;
     use axum::body::Body;
     use http_body_util::BodyExt;
@@ -96,6 +99,11 @@ mod tests {
         assert!(!body.contains("secret"));
         assert!(!body.contains("backend detail"));
     }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
 
     #[test]
     fn test_display_messages() {

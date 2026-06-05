@@ -1,17 +1,25 @@
+// Axum-free core — available without the `server` feature.
 pub mod audit;
-pub mod configured;
 pub mod dpop;
 pub mod jwks;
+pub mod ssh;
+
+// Axum/tower integration — only compiled with the `server` feature.
+#[cfg(feature = "server")]
+pub mod configured;
+#[cfg(feature = "server")]
 pub mod layer;
 #[cfg(feature = "mcp-server")]
 pub mod mcp;
+#[cfg(feature = "server")]
 pub mod middleware;
-pub mod ssh;
 
 pub use audit::{AuditLog, StdoutAuditLog};
+#[cfg(feature = "server")]
 pub use configured::{AuthBuilder, ConfiguredAuth, JwtAuthConfig, StaticTokenConfig};
 pub use dpop::{DpopProof, ath_for, cnf_jkt, jkt_thumbprint, verify_dpop_proof};
-pub use jwks::{JwksManager, verify_azp};
+pub use jwks::{JwksManager, standard_jwks_url, verify_azp};
+#[cfg(feature = "server")]
 pub use layer::{AuthLayer, AuthService};
 #[cfg(feature = "mcp-server")]
 pub use mcp::{
@@ -20,6 +28,7 @@ pub use mcp::{
     metadata_url_for_resource, protected_resource_metadata_router,
     protected_resource_metadata_router_at,
 };
+#[cfg(feature = "server")]
 pub use middleware::{AuthnProvider, OptionalAuth, RequiredAuth};
 pub use ssh::{
     CompiledSshProvider, NonceTracker, ParsedAuthorizedKey, SshSignatureHeader,

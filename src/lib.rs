@@ -5,12 +5,14 @@
 //!
 //! # Client usage (CLI, apps)
 //! ```rust,no_run
+//! # async fn example() -> anyhow::Result<()> {
+//! # #[cfg(feature = "client")] {
 //! use kunobi_auth::client::{AuthClient, ServiceConfig};
 //!
-//! # async fn example() -> anyhow::Result<()> {
 //! let config = ServiceConfig::discover("https://kobe.kunobi.ninja").await?;
 //! let client = AuthClient::new(config)?;
 //! let token = client.token().await?;
+//! # }
 //! # Ok(())
 //! # }
 //! ```
