@@ -1,6 +1,7 @@
 use anyhow::{Context, Result};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
+use serde::de::DeserializeOwned;
 use sha2::{Digest, Sha256};
 use std::collections::HashMap;
 use std::net::IpAddr;
@@ -144,6 +145,48 @@ impl JwksManager {
     ) -> Result<HashMap<String, serde_json::Value>> {
         self.validate_jwt_bound(token, jwks_url, issuer, audience, &[], algorithms)
             .await
+    }
+
+    /// Like [`validate_jwt`](Self::validate_jwt), but deserialize the validated
+    /// claims into a caller-supplied type `T` (e.g. a typed claims struct)
+    /// instead of returning an untyped map. Saves every consumer from
+    /// hand-rolling the map → struct conversion.
+    pub async fn validate_jwt_as<T: DeserializeOwned>(
+        &self,
+        token: &str,
+        jwks_url: &str,
+        issuer: &str,
+        audience: &[String],
+        algorithms: &[String],
+    ) -> Result<T> {
+        let claims = self
+            .validate_jwt(token, jwks_url, issuer, audience, algorithms)
+            .await?;
+        deserialize_claims(claims)
+    }
+
+    /// Like [`validate_jwt_bound`](Self::validate_jwt_bound), but deserialize the
+    /// validated claims into a caller-supplied type `T`.
+    pub async fn validate_jwt_bound_as<T: DeserializeOwned>(
+        &self,
+        token: &str,
+        jwks_url: &str,
+        issuer: &str,
+        audience: &[String],
+        authorized_parties: &[String],
+        algorithms: &[String],
+    ) -> Result<T> {
+        let claims = self
+            .validate_jwt_bound(
+                token,
+                jwks_url,
+                issuer,
+                audience,
+                authorized_parties,
+                algorithms,
+            )
+            .await?;
+        deserialize_claims(claims)
     }
 
     /// Validate a JWT bound by audience **or** authorized party (`azp`).
@@ -467,6 +510,14 @@ fn find_matching_key<'a>(keys: &'a [Jwk], kid: Option<&str>) -> Result<&'a Jwk> 
 /// [`JwksManager::validate_jwt`] directly instead.
 pub fn standard_jwks_url(issuer: &str) -> String {
     format!("{}/.well-known/jwks.json", issuer.trim_end_matches('/'))
+}
+
+/// Deserialize a validated claims map into a caller-supplied type.
+fn deserialize_claims<T: DeserializeOwned>(
+    claims: HashMap<String, serde_json::Value>,
+) -> Result<T> {
+    serde_json::from_value(serde_json::Value::Object(claims.into_iter().collect()))
+        .context("validated JWT claims did not deserialize into the requested type")
 }
 
 fn parse_algorithms(algorithms: &[String]) -> Result<Vec<Algorithm>> {
@@ -905,6 +956,33 @@ mod tests {
             standard_jwks_url("https://issuer.example.com/"),
             "https://issuer.example.com/.well-known/jwks.json"
         );
+    }
+
+    #[test]
+    fn test_deserialize_claims_into_typed_struct() {
+        #[derive(serde::Deserialize)]
+        struct Claims {
+            sub: String,
+            email: Option<String>,
+        }
+        let mut map: HashMap<String, serde_json::Value> = HashMap::new();
+        map.insert("sub".into(), serde_json::Value::from("user-1"));
+        map.insert("email".into(), serde_json::Value::from("u@example.com"));
+        map.insert("ignored_extra".into(), serde_json::Value::from(42));
+        let c: Claims = deserialize_claims(map).unwrap();
+        assert_eq!(c.sub, "user-1");
+        assert_eq!(c.email.as_deref(), Some("u@example.com"));
+    }
+
+    #[test]
+    fn test_deserialize_claims_errors_on_missing_required_field() {
+        #[derive(serde::Deserialize)]
+        struct Claims {
+            #[allow(dead_code)]
+            sub: String,
+        }
+        let map: HashMap<String, serde_json::Value> = HashMap::new();
+        assert!(deserialize_claims::<Claims>(map).is_err());
     }
 
     #[test]
