@@ -10,7 +10,17 @@ keywords = ["oidc", "authentication", "jwt", "kubernetes", "operator"]
 categories = ["authentication", "web-programming"]
 
 [features]
-default = ["client", "browser-login", "server"]
+default = ["client", "browser-login", "server", "rust_crypto"]
+# jsonwebtoken crypto backend selection. Cargo unifies features across the
+# whole dependency graph, and jsonwebtoken 10 panics on first signer/verifier
+# use when BOTH backends end up enabled (it cannot auto-select a provider).
+# Consumers that already link aws-lc-rs (e.g. via rustls/surrealdb) should
+# disable default features and enable `aws_lc_rs` instead. If neither backend
+# is enabled, the consumer must call
+# `jsonwebtoken::crypto::CryptoProvider::install_default()` before any JWT
+# operation.
+rust_crypto = ["jsonwebtoken/rust_crypto"]
+aws_lc_rs = ["jsonwebtoken/aws_lc_rs"]
 # Client token management: cached token store, refresh, revocation,
 # introspection, device-grant. Axum-free.
 client = ["dep:dirs", "dep:tempfile", "dep:sysinfo", "dep:openidconnect", "dep:oauth2"]
@@ -51,8 +61,9 @@ tokio = { version = "1", features = ["rt-multi-thread", "macros", "net", "sync",
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 
-# JWT validation (server)
-jsonwebtoken = { version = "10", features = ["rust_crypto"] }
+# JWT validation (server). Crypto backend is selected via this crate's
+# `rust_crypto` / `aws_lc_rs` features — see [features] above.
+jsonwebtoken = { version = "10", default-features = false, features = ["use_pem"] }
 
 # Browser (client)
 open = { version = "5", optional = true }
