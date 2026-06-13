@@ -14,11 +14,46 @@ pub enum AuthError {
     #[error("Rate limited: {0}")]
     RateLimited(String),
 
-    #[error("Internal auth error: {0}")]
-    Internal(String),
+    /// A server-side fault (500-class). `message` is a static, redaction-safe
+    /// summary surfaced in logs and Display; `source` carries the underlying
+    /// cause for server-side diagnostics via [`std::error::Error::source`] and
+    /// is NEVER serialized into the HTTP response body. Construct with
+    /// [`AuthError::internal`] / [`AuthError::internal_with_source`] rather than
+    /// the struct literal.
+    #[error("Internal auth error: {message}")]
+    Internal {
+        message: String,
+        #[source]
+        source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    },
 }
 
 impl AuthError {
+    /// An [`Internal`](AuthError::Internal) error with no underlying cause.
+    pub fn internal(message: impl Into<String>) -> Self {
+        Self::Internal {
+            message: message.into(),
+            source: None,
+        }
+    }
+
+    /// An [`Internal`](AuthError::Internal) error carrying its underlying cause.
+    ///
+    /// `message` should be a static, redaction-safe summary (it is the only
+    /// part surfaced to the client); the rich `source` detail is kept for
+    /// server-side logs / [`Error::source`](std::error::Error::source) and
+    /// never leaks into the response body. Accepts anything convertible into a
+    /// boxed error, including [`anyhow::Error`].
+    pub fn internal_with_source(
+        message: impl Into<String>,
+        source: impl Into<Box<dyn std::error::Error + Send + Sync + 'static>>,
+    ) -> Self {
+        Self::Internal {
+            message: message.into(),
+            source: Some(source.into()),
+        }
+    }
+
     /// The RFC 6750 `error` code for a `WWW-Authenticate: Bearer` challenge,
     /// or `None` for variants that do not carry a bearer challenge.
     ///
@@ -30,7 +65,7 @@ impl AuthError {
         match self {
             AuthError::Unauthorized(_) => Some("invalid_token"),
             AuthError::Forbidden(_) => Some("insufficient_scope"),
-            AuthError::RateLimited(_) | AuthError::Internal(_) => None,
+            AuthError::RateLimited(_) | AuthError::Internal { .. } => None,
         }
     }
 }
@@ -88,8 +123,15 @@ impl IntoResponse for AuthError {
                 Some(bearer_challenge("insufficient_scope", msg)),
             ),
             AuthError::RateLimited(msg) => (StatusCode::TOO_MANY_REQUESTS, msg.clone(), None),
-            AuthError::Internal(msg) => {
-                tracing::error!(error = %msg, "internal auth error");
+            AuthError::Internal { message, source } => {
+                // Log the static summary plus the underlying cause (server-side
+                // only); the body below stays the redacted static string.
+                match source {
+                    Some(cause) => {
+                        tracing::error!(error = %message, cause = %cause, "internal auth error")
+                    }
+                    None => tracing::error!(error = %message, "internal auth error"),
+                }
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
                     "internal auth error".to_string(),
@@ -169,7 +211,7 @@ mod response_tests {
 
     #[tokio::test]
     async fn test_internal_produces_500() {
-        let (status, _) = response_parts(AuthError::Internal("boom".into())).await;
+        let (status, _) = response_parts(AuthError::internal("boom")).await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
     }
 
@@ -182,14 +224,30 @@ mod response_tests {
 
     #[tokio::test]
     async fn test_internal_error_body_is_redacted() {
-        let (_, body) = response_parts(AuthError::Internal(
-            "db password=secret backend detail".into(),
-        ))
-        .await;
+        let (_, body) =
+            response_parts(AuthError::internal("db password=secret backend detail")).await;
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
         assert_eq!(parsed["error"], "internal auth error");
         assert!(!body.contains("secret"));
         assert!(!body.contains("backend detail"));
+    }
+
+    #[tokio::test]
+    async fn test_internal_with_source_redacts_both_message_and_cause() {
+        // Even with a cause attached, neither the static message nor the
+        // underlying source detail may reach the response body.
+        let cause = std::io::Error::other("secret cause: db password=hunter2");
+        let (status, body, challenge) = response_parts_with_challenge(
+            AuthError::internal_with_source("backend exploded", cause),
+        )
+        .await;
+        assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
+        assert!(challenge.is_none(), "Internal must not carry a challenge");
+        let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
+        assert_eq!(parsed["error"], "internal auth error");
+        assert!(!body.contains("secret cause"));
+        assert!(!body.contains("hunter2"));
+        assert!(!body.contains("backend exploded"));
     }
 
     // ── WWW-Authenticate challenge ────────────────────────────────────────
@@ -226,10 +284,9 @@ mod response_tests {
     #[tokio::test]
     async fn test_internal_has_no_challenge_and_redacts_body() {
         // The redaction guarantee must still hold AND no challenge must leak.
-        let (status, body, challenge) = response_parts_with_challenge(AuthError::Internal(
-            "db password=secret backend detail".into(),
-        ))
-        .await;
+        let (status, body, challenge) =
+            response_parts_with_challenge(AuthError::internal("db password=secret backend detail"))
+                .await;
         assert_eq!(status, StatusCode::INTERNAL_SERVER_ERROR);
         assert!(challenge.is_none(), "Internal must not carry a challenge");
         let parsed: serde_json::Value = serde_json::from_str(&body).unwrap();
@@ -284,10 +341,7 @@ mod response_tests {
             AuthError::RateLimited("x".into()).www_authenticate_error_code(),
             None
         );
-        assert_eq!(
-            AuthError::Internal("x".into()).www_authenticate_error_code(),
-            None
-        );
+        assert_eq!(AuthError::internal("x").www_authenticate_error_code(), None);
     }
 }
 
@@ -307,8 +361,42 @@ mod tests {
             "Rate limited: z"
         );
         assert_eq!(
-            AuthError::Internal("w".into()).to_string(),
+            AuthError::internal("w").to_string(),
             "Internal auth error: w"
         );
+    }
+
+    #[test]
+    fn internal_source_chain_is_preserved_and_display_stays_static() {
+        use std::error::Error;
+
+        // No cause: Display is the static message, source() is None.
+        let bare = AuthError::internal("clock skew");
+        assert_eq!(bare.to_string(), "Internal auth error: clock skew");
+        assert!(bare.source().is_none());
+
+        // With a cause: Display is unchanged (static), but source() exposes the
+        // underlying error for server-side diagnostics.
+        let with_cause = AuthError::internal_with_source(
+            "clock skew",
+            std::io::Error::other("system time before UNIX epoch"),
+        );
+        assert_eq!(with_cause.to_string(), "Internal auth error: clock skew");
+        let source = with_cause.source().expect("source must be exposed");
+        assert!(source.to_string().contains("UNIX epoch"));
+    }
+
+    #[test]
+    fn internal_with_source_accepts_anyhow_error() {
+        use std::error::Error;
+        // The classify path boxes an `anyhow::Error`; make sure that compiles
+        // and round-trips through source().
+        let err: anyhow::Error = anyhow::anyhow!("root").context("ctx");
+        let auth = AuthError::internal_with_source("JWKS fetch/transport failure", err);
+        assert_eq!(
+            auth.to_string(),
+            "Internal auth error: JWKS fetch/transport failure"
+        );
+        assert!(auth.source().is_some());
     }
 }

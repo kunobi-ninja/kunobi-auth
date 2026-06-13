@@ -1,3 +1,4 @@
+use crate::common::AuthFailReason;
 use anyhow::{Context, Result};
 use jsonwebtoken::errors::{Error as JwtError, ErrorKind as JwtErrorKind};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
@@ -20,6 +21,14 @@ const KID_MISS_REFRESH_COOLDOWN: Duration = Duration::from_secs(30);
 /// Cap on the per-token validation cache. Beyond this we evict the oldest
 /// entries on insert to keep memory bounded under unique-token churn.
 const VALIDATION_CACHE_MAX: usize = 4096;
+
+/// Default clock-skew tolerance for `exp`/`nbf` checks.
+///
+/// `jsonwebtoken` has long defaulted `Validation::leeway` to 60s *implicitly*;
+/// we set it explicitly (see [`JwksManager::with_leeway`]) so the tolerance is
+/// visible and tunable, and default to the same 60s so behavior is unchanged
+/// until an operator opts to narrow (or widen) it.
+const DEFAULT_JWT_LEEWAY: Duration = Duration::from_secs(60);
 
 /// Hard cap on a JWKS response body. The endpoint is operator-configured and
 /// trusted, but a compromised or misbehaving IdP shouldn't be able to make us
@@ -82,6 +91,9 @@ pub struct JwksManager {
     cache: RwLock<HashMap<String, CachedJwks>>,
     /// Per-token validation cache. `None` = disabled (default).
     validation_cache: Option<ValidationCache>,
+    /// Clock-skew tolerance applied to `exp`/`nbf`, in line with
+    /// `jsonwebtoken`'s `Validation::leeway`. Defaults to [`DEFAULT_JWT_LEEWAY`].
+    leeway: Duration,
 }
 
 struct ValidationCache {
@@ -106,7 +118,21 @@ impl JwksManager {
             http,
             cache: RwLock::new(HashMap::new()),
             validation_cache: None,
+            leeway: DEFAULT_JWT_LEEWAY,
         }
+    }
+
+    /// Set the clock-skew tolerance for `exp`/`nbf` validation.
+    ///
+    /// This caps how far a token's `exp` may be in the past (and `nbf`/`iat` in
+    /// the future) and still validate, absorbing clock drift between the IdP
+    /// and this host. Defaults to **60 seconds** — historically `jsonwebtoken`
+    /// applied that implicitly; we make it explicit and tunable here. Set a
+    /// smaller value to tighten the window (e.g. `Duration::from_secs(5)` when
+    /// clocks are NTP-synced), or `Duration::ZERO` to disable leeway entirely.
+    pub fn with_leeway(mut self, leeway: Duration) -> Self {
+        self.leeway = leeway;
+        self
     }
 
     /// Enable a per-token validation cache.
@@ -269,6 +295,11 @@ impl JwksManager {
             validation.set_issuer(&[issuer]);
             validation.validate_exp = true;
             validation.validate_nbf = true;
+            // Make the clock-skew tolerance explicit. `jsonwebtoken` defaults
+            // `leeway` to 60s implicitly even after setting validate_exp/nbf;
+            // we always assign it from `self.leeway` so the window is whatever
+            // the operator configured (default still 60s — see `with_leeway`).
+            validation.leeway = self.leeway.as_secs();
 
             let decoding_key = build_decoding_key(key)?;
             let token_data =
@@ -542,17 +573,28 @@ fn deserialize_claims<T: DeserializeOwned>(
 /// caller. Use the original error (kept in the source chain) for verbose
 /// server-side logs.
 pub fn jwt_error_message(err: &JwtError) -> &'static str {
+    jwt_fail_reason(err).message()
+}
+
+/// Classify a `jsonwebtoken` validation error into a typed, machine-readable
+/// [`AuthFailReason`] — the structured counterpart to [`jwt_error_message`]
+/// (which is just `jwt_fail_reason(err).message()`). Single-sources the
+/// failure taxonomy so the human string and the metrics label can never drift.
+///
+/// Like `jwt_error_message`, the result never carries token bytes or claim
+/// values — only the *class* of failure.
+pub fn jwt_fail_reason(err: &JwtError) -> AuthFailReason {
     match err.kind() {
-        JwtErrorKind::ExpiredSignature => "token expired",
-        JwtErrorKind::InvalidAudience => "token audience mismatch",
-        JwtErrorKind::InvalidIssuer => "token issuer mismatch",
-        JwtErrorKind::ImmatureSignature => "token not yet valid",
-        JwtErrorKind::InvalidSignature => "token signature invalid",
-        JwtErrorKind::InvalidAlgorithm => "signing algorithm not allowed",
-        JwtErrorKind::MissingRequiredClaim(_) => "token missing required claim",
+        JwtErrorKind::ExpiredSignature => AuthFailReason::Expired,
+        JwtErrorKind::InvalidAudience => AuthFailReason::AudienceMismatch,
+        JwtErrorKind::InvalidIssuer => AuthFailReason::IssuerMismatch,
+        JwtErrorKind::ImmatureSignature => AuthFailReason::NotYetValid,
+        JwtErrorKind::InvalidSignature => AuthFailReason::InvalidSignature,
+        JwtErrorKind::InvalidAlgorithm => AuthFailReason::AlgorithmNotAllowed,
+        JwtErrorKind::MissingRequiredClaim(_) => AuthFailReason::MissingRequiredClaim,
         // InvalidToken / Base64 / Json / Utf8 / InvalidClaimFormat and any
         // future shape errors collapse to a generic, safe "malformed token".
-        _ => "malformed token",
+        _ => AuthFailReason::MalformedToken,
     }
 }
 
@@ -1400,5 +1442,47 @@ mod tests {
             "super-secret-claim".into(),
         )));
         assert!(!msg.contains("super-secret-claim"));
+    }
+
+    #[test]
+    fn jwt_fail_reason_maps_kinds_and_stays_in_sync_with_message() {
+        let cases = [
+            (JwtErrorKind::ExpiredSignature, AuthFailReason::Expired),
+            (
+                JwtErrorKind::InvalidAudience,
+                AuthFailReason::AudienceMismatch,
+            ),
+            (JwtErrorKind::InvalidIssuer, AuthFailReason::IssuerMismatch),
+            (JwtErrorKind::ImmatureSignature, AuthFailReason::NotYetValid),
+            (
+                JwtErrorKind::InvalidSignature,
+                AuthFailReason::InvalidSignature,
+            ),
+            (
+                JwtErrorKind::InvalidAlgorithm,
+                AuthFailReason::AlgorithmNotAllowed,
+            ),
+            (
+                JwtErrorKind::MissingRequiredClaim("exp".into()),
+                AuthFailReason::MissingRequiredClaim,
+            ),
+            (JwtErrorKind::InvalidToken, AuthFailReason::MalformedToken),
+        ];
+        for (kind, expected) in cases {
+            let err = jwt_err(kind);
+            assert_eq!(jwt_fail_reason(&err), expected);
+            // The human message is single-sourced from the typed reason.
+            assert_eq!(jwt_error_message(&err), expected.message());
+        }
+    }
+
+    #[test]
+    fn with_leeway_overrides_the_default() {
+        let mgr = JwksManager::new();
+        assert_eq!(mgr.leeway, DEFAULT_JWT_LEEWAY);
+        let tightened = JwksManager::new().with_leeway(Duration::from_secs(5));
+        assert_eq!(tightened.leeway, Duration::from_secs(5));
+        let disabled = JwksManager::new().with_leeway(Duration::ZERO);
+        assert_eq!(disabled.leeway, Duration::ZERO);
     }
 }

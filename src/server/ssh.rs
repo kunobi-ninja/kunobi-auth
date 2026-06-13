@@ -368,7 +368,7 @@ pub fn verify_ssh_signature(
 
     let now_secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| AuthError::Internal(format!("system clock error: {e}")))?
+        .map_err(|e| AuthError::internal_with_source("system clock error", e))?
         .as_secs() as i64;
 
     // Drift check is asymmetric.

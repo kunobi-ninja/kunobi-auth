@@ -1,9 +1,12 @@
-//! Trust-on-first-use (TOFU) store for SSH service audience pinning.
+//! Trust-on-first-use (TOFU) store for pinning a service's issuer + audience.
 //!
-//! On first connection to a service the audience claim is recorded.
-//! Subsequent connections verify the audience matches what was stored.
-//! A mismatch signals a potential MITM and is surfaced as
-//! [`TofuResult::AudienceChanged`].
+//! On first connection to a service its issuer and audience are recorded via
+//! [`TofuStore::trust`]. Subsequent connections check that what's presented
+//! still matches what was stored. A mismatch signals a potential MITM:
+//! [`TofuStore::verify`] reports it as [`TofuResult::AudienceChanged`] (a
+//! status you can act on), while [`TofuStore::verify_or_reject`] is a strict,
+//! **fail-closed** gate that returns `Err` on any mismatch *or* on an unpinned
+//! service — so a caller cannot silently trust a new or changed endpoint.
 //!
 //! The store is process-local-locked (`std::sync::Mutex`) and writes are
 //! atomic via `tempfile::persist`, so concurrent `verify`/`trust` calls
@@ -17,8 +20,19 @@ use std::path::PathBuf;
 use std::sync::Mutex;
 
 /// A record stored for a single service endpoint.
+///
+/// `#[non_exhaustive]`: the documented construction path is
+/// [`TofuStore::trust`], so fields may be added (e.g. `issuer`) without a
+/// breaking change for downstream consumers.
 #[derive(Debug, Clone, Serialize, Deserialize)]
+#[non_exhaustive]
 pub struct KnownService {
+    /// The pinned OIDC issuer. `#[serde(default)]` so trust files written
+    /// before issuer pinning (audience-only) still deserialize; such legacy
+    /// entries have an empty issuer and are rejected by
+    /// [`TofuStore::verify_or_reject`] until re-trusted.
+    #[serde(default)]
+    pub issuer: String,
     pub audience: String,
     pub first_seen: String,
     pub last_seen: String,
@@ -100,8 +114,55 @@ impl TofuStore {
         }
     }
 
-    /// Record (or update) trust for `endpoint` with `audience`.
-    pub fn trust(&self, endpoint: &str, audience: &str) -> Result<()> {
+    /// Fail-closed trust gate: returns `Ok(())` **only** when `endpoint` is
+    /// already pinned *and* the pinned issuer and audience both match exactly.
+    ///
+    /// Unlike [`Self::verify`] (which reports a status and returns `Ok` even on
+    /// a mismatch), this rejects:
+    /// - an unpinned endpoint (first contact) — establish trust explicitly with
+    ///   [`Self::trust`] first, e.g. after prompting the user;
+    /// - a legacy entry pinned before issuer support (empty issuer) — re-trust
+    ///   to upgrade the pin;
+    /// - any change of issuer or audience (possible MITM).
+    ///
+    /// A caller that routes through `verify_or_reject` therefore cannot be
+    /// silently steered onto a new or substituted issuer.
+    pub fn verify_or_reject(&self, endpoint: &str, issuer: &str, audience: &str) -> Result<()> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("TOFU store mutex poisoned"))?;
+        let known = self.load_locked()?;
+
+        let Some(entry) = known.get(endpoint) else {
+            anyhow::bail!(
+                "TOFU: refusing to trust unpinned service {endpoint}; call trust() to establish first-use trust"
+            );
+        };
+        if entry.issuer.is_empty() {
+            anyhow::bail!(
+                "TOFU: service {endpoint} was pinned without an issuer (legacy entry); re-run trust() to upgrade the pin"
+            );
+        }
+        if entry.issuer != issuer {
+            anyhow::bail!(
+                "TOFU: issuer changed for {endpoint} (possible MITM): pinned {pinned:?}, presented {issuer:?}",
+                pinned = entry.issuer
+            );
+        }
+        if entry.audience != audience {
+            anyhow::bail!(
+                "TOFU: audience changed for {endpoint} (possible MITM): pinned {pinned:?}, presented {audience:?}",
+                pinned = entry.audience
+            );
+        }
+        Ok(())
+    }
+
+    /// Record (or update) trust for `endpoint`, pinning its `issuer` and
+    /// `audience`. Overwrites any previous pin for the endpoint (this is how a
+    /// legacy or rotated entry is upgraded).
+    pub fn trust(&self, endpoint: &str, issuer: &str, audience: &str) -> Result<()> {
         let _guard = self
             .lock
             .lock()
@@ -113,10 +174,12 @@ impl TofuStore {
         known
             .entry(endpoint.to_string())
             .and_modify(|e| {
+                e.issuer = issuer.to_string();
                 e.audience = audience.to_string();
                 e.last_seen = now.clone();
             })
             .or_insert_with(|| KnownService {
+                issuer: issuer.to_string(),
                 audience: audience.to_string(),
                 first_seen: now.clone(),
                 last_seen: now.clone(),
@@ -237,7 +300,7 @@ mod tests {
     fn test_trusted_after_trust() {
         let store = temp_store();
         store
-            .trust("https://api.example.com", "api://example")
+            .trust("https://api.example.com", "https://idp", "api://example")
             .unwrap();
 
         let result = store
@@ -253,7 +316,11 @@ mod tests {
     fn test_audience_changed() {
         let store = temp_store();
         store
-            .trust("https://api.example.com", "api://old-audience")
+            .trust(
+                "https://api.example.com",
+                "https://idp",
+                "api://old-audience",
+            )
             .unwrap();
 
         let result = store
@@ -276,8 +343,107 @@ mod tests {
     fn test_file_permissions_are_0600() {
         use std::os::unix::fs::PermissionsExt;
         let store = temp_store();
-        store.trust("https://api.example.com", "aud").unwrap();
+        store
+            .trust("https://api.example.com", "https://idp", "aud")
+            .unwrap();
         let mode = std::fs::metadata(&store.path).unwrap().permissions().mode() & 0o777;
         assert_eq!(mode, 0o600, "expected 0o600, got {mode:o}");
+    }
+
+    // ── verify_or_reject: fail-closed issuer + audience gate ──────────────
+
+    #[test]
+    fn verify_or_reject_rejects_unpinned_service() {
+        let store = temp_store();
+        let err = store
+            .verify_or_reject("https://api.example.com", "https://idp", "aud")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("unpinned"), "got: {err}");
+    }
+
+    #[test]
+    fn verify_or_reject_accepts_exact_issuer_and_audience_match() {
+        let store = temp_store();
+        store
+            .trust("https://api.example.com", "https://idp", "aud")
+            .unwrap();
+        store
+            .verify_or_reject("https://api.example.com", "https://idp", "aud")
+            .expect("matching issuer+audience must pass");
+    }
+
+    #[test]
+    fn verify_or_reject_rejects_issuer_change() {
+        let store = temp_store();
+        store
+            .trust("https://api.example.com", "https://idp", "aud")
+            .unwrap();
+        let err = store
+            .verify_or_reject("https://api.example.com", "https://evil-idp", "aud")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("issuer changed"), "got: {err}");
+    }
+
+    #[test]
+    fn verify_or_reject_rejects_audience_change() {
+        let store = temp_store();
+        store
+            .trust("https://api.example.com", "https://idp", "aud")
+            .unwrap();
+        let err = store
+            .verify_or_reject("https://api.example.com", "https://idp", "other-aud")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("audience changed"), "got: {err}");
+    }
+
+    #[test]
+    fn verify_or_reject_rejects_legacy_entry_without_issuer() {
+        // Simulate a pre-issuer trust file: KnownService with an empty issuer
+        // (the #[serde(default)] path). It must fail closed until re-trusted.
+        let store = temp_store();
+        let legacy = HashMap::from([(
+            "https://api.example.com".to_string(),
+            KnownService {
+                issuer: String::new(),
+                audience: "aud".to_string(),
+                first_seen: now_rfc3339(),
+                last_seen: now_rfc3339(),
+            },
+        )]);
+        store.save_locked(&legacy).unwrap();
+
+        let err = store
+            .verify_or_reject("https://api.example.com", "https://idp", "aud")
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("without an issuer"), "got: {err}");
+
+        // Re-trusting upgrades the pin and then it passes.
+        store
+            .trust("https://api.example.com", "https://idp", "aud")
+            .unwrap();
+        store
+            .verify_or_reject("https://api.example.com", "https://idp", "aud")
+            .expect("re-trust upgrades the legacy pin");
+    }
+
+    #[test]
+    fn legacy_audience_only_json_still_deserializes() {
+        // A trust file written before issuer pinning has no `issuer` key.
+        let store = temp_store();
+        let legacy_json = r#"{
+            "https://api.example.com": {
+                "audience": "aud",
+                "first_seen": "2024-01-01T00:00:00Z",
+                "last_seen": "2024-01-01T00:00:00Z"
+            }
+        }"#;
+        std::fs::write(&store.path, legacy_json).unwrap();
+        // verify() (audience-only) still works against the legacy entry.
+        let result = store.verify("https://api.example.com", "aud").unwrap();
+        assert!(matches!(result, TofuResult::Trusted));
     }
 }

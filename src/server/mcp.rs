@@ -459,7 +459,7 @@ mod tests {
                     method: "token".into(),
                     claims: HashMap::new(),
                 }),
-                "boom" => Err(AuthError::Internal("database down".into())),
+                "boom" => Err(AuthError::internal("database down")),
                 _ => Err(AuthError::Unauthorized("bad token".into())),
             }
         }
