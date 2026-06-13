@@ -1,4 +1,5 @@
 use anyhow::{Context, Result};
+use jsonwebtoken::errors::{Error as JwtError, ErrorKind as JwtErrorKind};
 use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
@@ -236,15 +237,21 @@ impl JwksManager {
         let claims = if let Some(claims) = cached {
             claims
         } else {
-            let header = decode_header(token).context("Invalid JWT header")?;
+            let header = decode_header(token).context("malformed token")?;
             let kid = header.kid.as_deref();
             let allowed_algorithms = parse_algorithms(algorithms)?;
             if !allowed_algorithms.contains(&header.alg) {
-                anyhow::bail!("JWT algorithm {:?} is not allowed", header.alg);
+                // Redaction-safe: do not echo the header alg back to the caller
+                // in the user-facing message (the detail is logged server-side).
+                anyhow::bail!("signing algorithm not allowed");
             }
 
             let keys = self.get_keys(jwks_url, kid).await?;
-            let key = find_matching_key(&keys, kid)?;
+            // Map an unknown-`kid`/no-usable-key lookup to a stable, redaction-safe
+            // reason. `find_matching_key`'s detailed message (which echoes the kid)
+            // is preserved in the error source chain for server-side logs.
+            let key = find_matching_key(&keys, kid)
+                .map_err(|e| e.context("unknown signing key (kid)"))?;
 
             let mut validation = Validation::new(header.alg);
             // jsonwebtoken only enforces a claim when present unless it is listed
@@ -266,7 +273,13 @@ impl JwksManager {
             let decoding_key = build_decoding_key(key)?;
             let token_data =
                 decode::<HashMap<String, serde_json::Value>>(token, &decoding_key, &validation)
-                    .context("JWT validation failed")?;
+                    .map_err(|e| {
+                        // Map jsonwebtoken's ErrorKind to a specific, redaction-safe
+                        // reason for the 401, keeping the original error as the
+                        // source for server-side logs (it carries no token bytes).
+                        let reason = jwt_error_message(&e);
+                        anyhow::Error::new(e).context(reason)
+                    })?;
 
             // Populate the validation cache, capping TTL by token.exp.
             if let Some(cache) = &self.validation_cache {
@@ -518,6 +531,29 @@ fn deserialize_claims<T: DeserializeOwned>(
 ) -> Result<T> {
     serde_json::from_value(serde_json::Value::Object(claims.into_iter().collect()))
         .context("validated JWT claims did not deserialize into the requested type")
+}
+
+/// Map a `jsonwebtoken` validation error to a specific, redaction-safe
+/// human-readable reason suitable for a 401 body / `WWW-Authenticate`
+/// `error_description`.
+///
+/// The returned `&'static str` never contains token bytes, claim values, or
+/// key material — only the *class* of failure, so it is safe to surface to the
+/// caller. Use the original error (kept in the source chain) for verbose
+/// server-side logs.
+pub fn jwt_error_message(err: &JwtError) -> &'static str {
+    match err.kind() {
+        JwtErrorKind::ExpiredSignature => "token expired",
+        JwtErrorKind::InvalidAudience => "token audience mismatch",
+        JwtErrorKind::InvalidIssuer => "token issuer mismatch",
+        JwtErrorKind::ImmatureSignature => "token not yet valid",
+        JwtErrorKind::InvalidSignature => "token signature invalid",
+        JwtErrorKind::InvalidAlgorithm => "signing algorithm not allowed",
+        JwtErrorKind::MissingRequiredClaim(_) => "token missing required claim",
+        // InvalidToken / Base64 / Json / Utf8 / InvalidClaimFormat and any
+        // future shape errors collapse to a generic, safe "malformed token".
+        _ => "malformed token",
+    }
 }
 
 fn parse_algorithms(algorithms: &[String]) -> Result<Vec<Algorithm>> {
@@ -1299,5 +1335,70 @@ mod tests {
     fn verify_azp_rejects_missing_claim_when_required() {
         let allowed = vec!["cli".to_string()];
         assert!(verify_azp(&claims_with_azp(None), &allowed).is_err());
+    }
+
+    // ── jwt_error_message mapping ─────────────────────────────────────────
+    //
+    // The 401 the caller sees is only as useful as this mapping, so pin each
+    // ErrorKind -> message edge directly (minting real expired/wrong-aud JWTs
+    // is heavy; the mapping fn is the load-bearing piece).
+
+    fn jwt_err(kind: JwtErrorKind) -> JwtError {
+        jsonwebtoken::errors::new_error(kind)
+    }
+
+    #[test]
+    fn jwt_error_message_maps_known_kinds_to_specific_reasons() {
+        assert_eq!(
+            jwt_error_message(&jwt_err(JwtErrorKind::ExpiredSignature)),
+            "token expired"
+        );
+        assert_eq!(
+            jwt_error_message(&jwt_err(JwtErrorKind::InvalidAudience)),
+            "token audience mismatch"
+        );
+        assert_eq!(
+            jwt_error_message(&jwt_err(JwtErrorKind::InvalidIssuer)),
+            "token issuer mismatch"
+        );
+        assert_eq!(
+            jwt_error_message(&jwt_err(JwtErrorKind::ImmatureSignature)),
+            "token not yet valid"
+        );
+        assert_eq!(
+            jwt_error_message(&jwt_err(JwtErrorKind::InvalidSignature)),
+            "token signature invalid"
+        );
+        assert_eq!(
+            jwt_error_message(&jwt_err(JwtErrorKind::InvalidAlgorithm)),
+            "signing algorithm not allowed"
+        );
+        assert_eq!(
+            jwt_error_message(&jwt_err(JwtErrorKind::MissingRequiredClaim("exp".into()))),
+            "token missing required claim"
+        );
+    }
+
+    #[test]
+    fn jwt_error_message_collapses_unknown_kinds_to_malformed() {
+        assert_eq!(
+            jwt_error_message(&jwt_err(JwtErrorKind::InvalidToken)),
+            "malformed token"
+        );
+        assert_eq!(
+            jwt_error_message(&jwt_err(JwtErrorKind::InvalidClaimFormat("exp".into()))),
+            "malformed token"
+        );
+    }
+
+    #[test]
+    fn jwt_error_message_is_redaction_safe() {
+        // The mapped reason is a fixed &'static str: it can never carry token
+        // bytes or key material, even when the underlying kind embeds a claim
+        // name.
+        let msg = jwt_error_message(&jwt_err(JwtErrorKind::MissingRequiredClaim(
+            "super-secret-claim".into(),
+        )));
+        assert!(!msg.contains("super-secret-claim"));
     }
 }

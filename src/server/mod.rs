@@ -24,7 +24,7 @@ pub use discovery::{
     KUNOBI_AUTH_DISCOVERY_PATH, kunobi_auth_discovery_router, kunobi_auth_discovery_router_at,
 };
 pub use dpop::{DpopProof, ath_for, cnf_jkt, jkt_thumbprint, verify_dpop_proof};
-pub use jwks::{JwksManager, standard_jwks_url, verify_azp};
+pub use jwks::{JwksManager, jwt_error_message, standard_jwks_url, verify_azp};
 #[cfg(feature = "server")]
 pub use layer::{AuthLayer, AuthService};
 #[cfg(feature = "mcp-server")]
