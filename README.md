@@ -21,6 +21,8 @@ No Kubernetes dependency. Tested end-to-end against [Dex](https://dexidp.io/) v2
 | `client`     | yes     | OIDC browser login (PKCE), device-authorization grant, refresh-token flow, token introspection + revocation, static-token, SSH-agent signing, TOFU audience pinning, per-shell session state                                      |
 | `server`     | yes     | JWT/JWKS validation (RS/PS/ES/EdDSA + auto-rotating cache), opt-in per-token validation cache, DPoP proof verifier (RFC 9449), SSH-signature verification with atomic-replay-protected nonce tracker, `AuthLayer` + axum extractors |
 | `mcp-server` | no      | MCP resource-server helpers on top of `server`: OAuth Protected Resource Metadata, MCP `WWW-Authenticate` challenges, and required bearer auth middleware                                           |
+| `rust_crypto` | yes    | jsonwebtoken's pure-Rust crypto backend                                                                                                                                                              |
+| `aws_lc_rs`  | no      | jsonwebtoken's aws-lc-rs crypto backend — pick this instead of `rust_crypto` if your app already links aws-lc-rs (e.g. via rustls), to avoid enabling both backends                                  |
 
 ```toml
 # Server only (no browser deps)
@@ -32,6 +34,13 @@ kunobi-auth = { git = "https://github.com/kunobi-ninja/kunobi-auth", tag = "v0.5
 # Client only
 kunobi-auth = { git = "https://github.com/kunobi-ninja/kunobi-auth", tag = "v0.5.0", default-features = false, features = ["client"] }
 ```
+
+**Crypto backend:** when using `default-features = false`, also enable exactly one
+of `rust_crypto` / `aws_lc_rs`. Cargo unifies features across the whole dependency
+graph, and jsonwebtoken 10 panics at the first JWT operation if both backends end
+up enabled and no provider was installed; `kunobi-auth` installs the backend you
+select here on first use (call `kunobi_auth::ensure_crypto_provider()` or
+jsonwebtoken's `CryptoProvider::install_default()` yourself to override).
 
 > The crate is not (yet) on crates.io. Pin via git tag — see the [latest release](https://github.com/kunobi-ninja/kunobi-auth/releases) for stable refs.
 

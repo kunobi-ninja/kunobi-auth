@@ -568,6 +568,7 @@ fn is_loopback_url(url: &reqwest::Url) -> bool {
 }
 
 fn build_decoding_key(key: &Jwk) -> Result<DecodingKey> {
+    crate::common::crypto::ensure_crypto_provider();
     match key.kty.as_str() {
         "RSA" => {
             let n = key

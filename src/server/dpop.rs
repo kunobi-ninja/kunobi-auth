@@ -110,6 +110,8 @@ pub fn verify_dpop_proof(
     expected_jkt: Option<&str>,
     max_iat_skew: Duration,
 ) -> Result<DpopProof, AuthError> {
+    crate::common::crypto::ensure_crypto_provider();
+
     // Step 1: parse + validate header.
     let header = decode_header(proof_jwt)
         .map_err(|e| AuthError::Unauthorized(format!("invalid DPoP JWT header: {e}")))?;
@@ -324,6 +326,7 @@ CIAe12xZratKWzRoekhOUBIDCZChRANCAAQitjpgInyqDv9dQ4D0FZ4SiZX+KaqP
     }
 
     fn make_proof(htm: &str, htu: &str, iat: i64, jti: &str, ath: Option<&str>) -> String {
+        crate::common::crypto::ensure_crypto_provider();
         let mut header = jsonwebtoken::Header::new(Algorithm::ES256);
         header.typ = Some("dpop+jwt".into());
         header.jwk = Some(test_jwk());

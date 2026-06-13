@@ -63,6 +63,7 @@ impl TestIdp {
     /// Sign a JWT with the test private key. Caller supplies the full
     /// claims object.
     fn issue(&self, claims: &serde_json::Value) -> String {
+        kunobi_auth::ensure_crypto_provider();
         let mut header = Header::new(jsonwebtoken::Algorithm::ES256);
         header.kid = Some(TEST_KID.into());
         let key = EncodingKey::from_ec_pem(TEST_PRIV_PEM.as_bytes()).unwrap();
