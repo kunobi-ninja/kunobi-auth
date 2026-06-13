@@ -143,7 +143,13 @@ proptest! {
         sub in "[a-zA-Z0-9_-]{1,32}",
         aud in "[a-zA-Z0-9_:.-]{1,64}",
         ttl_secs in 60i64..3600i64,
-        extra_claim_key in "[a-z]{1,10}",
+        // Must NOT shadow a registered claim: `json!` keeps the *last* key, so
+        // an `extra_claim_key` of "exp"/"aud"/"iss"/... would overwrite the real
+        // claim with a random string and make this "well-formed" token invalid.
+        extra_claim_key in "[a-z]{1,10}".prop_filter(
+            "extra claim must not shadow a reserved JWT claim",
+            |k| !matches!(k.as_str(), "iss" | "aud" | "sub" | "exp" | "iat" | "nbf" | "jti" | "azp"),
+        ),
         extra_claim_val in "[a-zA-Z0-9 _-]{0,32}",
     ) {
         let idp = test_idp();
