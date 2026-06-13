@@ -49,5 +49,6 @@ pub mod server;
 // Re-export common types at crate root
 pub use common::crypto::ensure_crypto_provider;
 pub use common::{
-    AuthError, AuthIdentity, AuthMethod, KunobiAuthDiscovery, StatusResponse, secret_eq,
+    AuthError, AuthIdentity, AuthMethod, ClaimMatch, KunobiAuthDiscovery, StatusResponse,
+    first_match, secret_eq,
 };
