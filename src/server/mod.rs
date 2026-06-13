@@ -8,6 +8,8 @@ pub mod ssh;
 #[cfg(feature = "server")]
 pub mod configured;
 #[cfg(feature = "server")]
+pub mod discovery;
+#[cfg(feature = "server")]
 pub mod layer;
 #[cfg(feature = "mcp-server")]
 pub mod mcp;
@@ -17,6 +19,10 @@ pub mod middleware;
 pub use audit::{AuditLog, StdoutAuditLog};
 #[cfg(feature = "server")]
 pub use configured::{AuthBuilder, ConfiguredAuth, JwtAuthConfig, StaticTokenConfig};
+#[cfg(feature = "server")]
+pub use discovery::{
+    KUNOBI_AUTH_DISCOVERY_PATH, kunobi_auth_discovery_router, kunobi_auth_discovery_router_at,
+};
 pub use dpop::{DpopProof, ath_for, cnf_jkt, jkt_thumbprint, verify_dpop_proof};
 pub use jwks::{JwksManager, standard_jwks_url, verify_azp};
 #[cfg(feature = "server")]
