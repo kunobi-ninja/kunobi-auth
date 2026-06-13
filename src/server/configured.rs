@@ -189,6 +189,13 @@ impl AuthnProvider for ConfiguredAuth {
             }
         }
 
+        // Remember the most specific JWT rejection so the final 401 carries an
+        // actionable reason (e.g. "token expired") instead of a blanket
+        // "invalid bearer token". Multiple JWT providers rejecting a token is
+        // normal in a multi-issuer setup, so each rejection is logged at debug,
+        // not warn.
+        let mut last_jwt_err: Option<AuthError> = None;
+
         for config in self.jwt.iter() {
             // A provider must bind tokens by audience or azp; both empty would
             // accept any signed token from the issuer.
@@ -214,7 +221,17 @@ impl AuthnProvider for ConfiguredAuth {
                 .await
             {
                 Ok(claims) => claims,
-                Err(_) => continue,
+                Err(e) => {
+                    // Don't swallow the reason: log the specific error
+                    // server-side and keep it so the 401 can surface it.
+                    tracing::debug!(
+                        provider = %config.provider,
+                        error = %e,
+                        "JWT provider rejected token"
+                    );
+                    last_jwt_err = Some(classify_jwt_error(e));
+                    continue;
+                }
             };
 
             let identity = claims
@@ -236,8 +253,55 @@ impl AuthnProvider for ConfiguredAuth {
             });
         }
 
-        Err(AuthError::Unauthorized("invalid bearer token".into()))
+        // Surface the most specific JWT rejection (e.g. "token expired") when a
+        // provider was tried; otherwise no JWT provider matched at all, so fall
+        // back to a generic reason. Transport faults are preserved as Internal
+        // by `classify_jwt_error`, so a JWKS outage still reads as a 500.
+        Err(last_jwt_err.unwrap_or_else(|| AuthError::Unauthorized("invalid bearer token".into())))
     }
+}
+
+/// Classify an [`anyhow::Error`] from `validate_jwt_bound` into the right
+/// [`AuthError`] without echoing token bytes or key material.
+///
+/// JWKS *transport/structural* faults (network failure, oversized/invalid JWKS,
+/// bad JWKS URL) are the server's problem, not the caller's — they map to
+/// [`AuthError::Internal`] (500-class) with the detail kept for server logs.
+/// Everything else is a token-level validation failure and maps to
+/// [`AuthError::Unauthorized`] carrying the specific, redaction-safe top-level
+/// message produced in `jwks` (e.g. "token expired", "token audience mismatch").
+fn classify_jwt_error(err: anyhow::Error) -> AuthError {
+    if is_jwks_transport_fault(&err) {
+        // Keep the full detail server-side (Internal is logged + redacted in
+        // `into_response`); never leak it to the 401 path.
+        return AuthError::Internal(format!("JWKS fetch/transport failure: {err:#}"));
+    }
+    // The top-level message is the specific, safe reason set in `jwks`.
+    AuthError::Unauthorized(err.to_string())
+}
+
+/// Whether the error chain points at a JWKS fetch/transport/structural fault
+/// (server-side) rather than a token validation failure (caller-side).
+fn is_jwks_transport_fault(err: &anyhow::Error) -> bool {
+    // A reqwest error anywhere in the chain is a definitive transport fault.
+    if err.chain().any(|cause| cause.is::<reqwest::Error>()) {
+        return true;
+    }
+    // The remaining JWKS server-side faults are raised via `anyhow` with these
+    // stable context/message prefixes (see `jwks::get_keys` /
+    // `validate_remote_auth_url`). Match on those so a misbehaving IdP or a
+    // misconfigured JWKS URL reads as a 500, not a 401.
+    const JWKS_FAULT_MARKERS: [&str; 5] = [
+        "Failed to fetch JWKS",
+        "Failed to read JWKS response body",
+        "Failed to parse JWKS",
+        "JWKS response exceeds",
+        "JWKS URL",
+    ];
+    err.chain().any(|cause| {
+        let msg = cause.to_string();
+        JWKS_FAULT_MARKERS.iter().any(|marker| msg.contains(marker))
+    })
 }
 
 #[cfg(test)]
@@ -344,5 +408,87 @@ mod tests {
         let authorized: Vec<String> = Vec::new();
         let missing: HashMap<String, Value> = HashMap::new();
         assert!(azp_allowed(&authorized, &missing));
+    }
+
+    // ── classify_jwt_error: don't swallow the reason ──────────────────────
+
+    #[test]
+    fn classify_jwt_error_surfaces_specific_validation_reason() {
+        // A token-validation failure becomes a SPECIFIC Unauthorized, carrying
+        // the exact reason `jwks` produced -- never the blanket message.
+        let err = anyhow::anyhow!("token expired");
+        match classify_jwt_error(err) {
+            AuthError::Unauthorized(msg) => {
+                assert_eq!(msg, "token expired");
+                assert_ne!(msg, "invalid bearer token");
+            }
+            other => panic!("expected Unauthorized, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn classify_jwt_error_keeps_transport_faults_as_internal() {
+        // A JWKS fetch failure is the server's fault (500-class), not the
+        // caller's -- it must NOT degrade into a 401.
+        let err = anyhow::anyhow!("connection refused").context("Failed to fetch JWKS");
+        assert!(matches!(classify_jwt_error(err), AuthError::Internal(_)));
+    }
+
+    #[test]
+    fn classify_jwt_error_treats_jwks_structural_faults_as_internal() {
+        for ctx in [
+            "Failed to parse JWKS",
+            "Failed to read JWKS response body",
+            "JWKS response exceeds the 1048576-byte limit",
+            "JWKS URL must use https outside loopback/test hosts: http://idp/jwks",
+        ] {
+            let err = anyhow::anyhow!("{ctx}");
+            assert!(
+                matches!(classify_jwt_error(err), AuthError::Internal(_)),
+                "expected Internal for {ctx:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticate_surfaces_specific_reason_not_blanket() {
+        // With a single OIDC provider pointed at a loopback JWKS URL that never
+        // answers, an arbitrary bearer fails at the *transport* layer, so the
+        // result is Internal (server fault) rather than the old blanket
+        // "invalid bearer token" 401 -- proving the reason is no longer
+        // swallowed. (The ErrorKind->message mapping for genuine token
+        // rejections is unit-tested in `jwks`.)
+        let auth = AuthBuilder::new()
+            .oidc(
+                "test",
+                "https://issuer.example.com",
+                // Loopback + unused port: connection refused fast, no network.
+                "http://127.0.0.1:1/.well-known/jwks.json",
+                vec!["aud".into()],
+            )
+            .build();
+
+        let err = auth.authenticate("some.bearer.token").await.unwrap_err();
+        match err {
+            AuthError::Internal(_) => {}
+            AuthError::Unauthorized(msg) => {
+                assert_ne!(msg, "invalid bearer token", "reason must be specific");
+            }
+            other => panic!("unexpected error: {other:?}"),
+        }
+    }
+
+    #[tokio::test]
+    async fn authenticate_falls_back_to_generic_when_no_jwt_provider() {
+        // No JWT provider configured and the static token doesn't match: there
+        // is no specific JWT reason, so we keep the generic fallback.
+        let auth = AuthBuilder::new()
+            .static_token("dev-token", "secret", "dev-user")
+            .build();
+        let err = auth.authenticate("wrong").await.unwrap_err();
+        match err {
+            AuthError::Unauthorized(msg) => assert_eq!(msg, "invalid bearer token"),
+            other => panic!("expected generic Unauthorized, got {other:?}"),
+        }
     }
 }
