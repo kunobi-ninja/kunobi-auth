@@ -5,18 +5,38 @@ use std::time::Duration;
 
 use serde_json::Value;
 
-use crate::common::{AuthError, AuthIdentity, secret_eq};
+use crate::common::{AuthError, AuthFailReason, AuthIdentity, secret_eq};
+use crate::server::observer::{AuthEvent, AuthObserver};
 use crate::server::{AuthnProvider, JwksManager};
+use jsonwebtoken::errors::Error as JwtError;
 
 /// Builder for common server-side auth configuration.
 ///
 /// This implements the usual "products declare what they accept" path:
 /// JWT/OIDC/static Bearer tokens in, normalized [`AuthIdentity`] out.
-#[derive(Debug, Default)]
+// `Debug` is hand-written below: `Arc<dyn AuthObserver>` is not `Debug`, so the
+// derive would not apply. `Default` still derives (every field, incl.
+// `Option<Arc<dyn …>>`, defaults).
+#[derive(Default)]
 pub struct AuthBuilder {
     jwt: Vec<JwtAuthConfig>,
     static_tokens: Vec<StaticTokenConfig>,
     validation_cache_ttl: Option<Duration>,
+    leeway: Option<Duration>,
+    observer: Option<Arc<dyn AuthObserver>>,
+}
+
+impl fmt::Debug for AuthBuilder {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("AuthBuilder")
+            .field("jwt", &self.jwt)
+            .field("static_tokens", &self.static_tokens)
+            .field("validation_cache_ttl", &self.validation_cache_ttl)
+            .field("leeway", &self.leeway)
+            // `dyn AuthObserver` is opaque; just record presence.
+            .field("observer", &self.observer.as_ref().map(|_| "<set>"))
+            .finish()
+    }
 }
 
 /// A ready-to-use auth provider for [`AuthLayer`](crate::server::AuthLayer)
@@ -26,6 +46,8 @@ pub struct ConfiguredAuth {
     jwks: Arc<JwksManager>,
     jwt: Arc<Vec<JwtAuthConfig>>,
     static_tokens: Arc<Vec<StaticTokenConfig>>,
+    /// Optional telemetry hook invoked on every auth attempt (default: none).
+    observer: Option<Arc<dyn AuthObserver>>,
 }
 
 /// JWT validation config for one issuer/provider.
@@ -63,6 +85,22 @@ impl AuthBuilder {
         self
     }
 
+    /// Set the JWT clock-skew tolerance for `exp`/`nbf` across all providers
+    /// (see [`JwksManager::with_leeway`]). Defaults to 60s when unset.
+    pub fn leeway(mut self, leeway: Duration) -> Self {
+        self.leeway = Some(leeway);
+        self
+    }
+
+    /// Register a telemetry hook invoked on every authentication attempt.
+    ///
+    /// The observer is called synchronously on the auth path and must not
+    /// block — see [`AuthObserver`]. Wrap shared state in the `Arc` you pass in.
+    pub fn observer(mut self, observer: Arc<dyn AuthObserver>) -> Self {
+        self.observer = Some(observer);
+        self
+    }
+
     pub fn jwt(mut self, config: JwtAuthConfig) -> Self {
         self.jwt.push(config);
         self
@@ -90,15 +128,19 @@ impl AuthBuilder {
     }
 
     pub fn build(self) -> ConfiguredAuth {
-        let jwks = match self.validation_cache_ttl {
-            Some(ttl) => JwksManager::new().with_validation_cache(ttl),
-            None => JwksManager::new(),
-        };
+        let mut jwks = JwksManager::new();
+        if let Some(ttl) = self.validation_cache_ttl {
+            jwks = jwks.with_validation_cache(ttl);
+        }
+        if let Some(leeway) = self.leeway {
+            jwks = jwks.with_leeway(leeway);
+        }
 
         ConfiguredAuth {
             jwks: Arc::new(jwks),
             jwt: Arc::new(self.jwt),
             static_tokens: Arc::new(self.static_tokens),
+            observer: self.observer,
         }
     }
 }
@@ -176,16 +218,29 @@ impl fmt::Debug for StaticTokenConfig {
     }
 }
 
+impl ConfiguredAuth {
+    /// Notify the registered observer, if any. A cheap no-op when unset.
+    fn observe(&self, event: AuthEvent<'_>) {
+        if let Some(observer) = &self.observer {
+            observer.observe(event);
+        }
+    }
+}
+
 impl AuthnProvider for ConfiguredAuth {
     async fn authenticate(&self, token: &str) -> Result<AuthIdentity, AuthError> {
         for config in self.static_tokens.iter() {
             if secret_eq(&config.token, token) {
-                return Ok(AuthIdentity {
+                let identity = AuthIdentity {
                     provider: config.provider.clone(),
                     identity: config.identity.clone(),
                     method: "token".into(),
                     claims: config.claims.clone(),
+                };
+                self.observe(AuthEvent::Success {
+                    identity: &identity,
                 });
+                return Ok(identity);
             }
         }
 
@@ -193,14 +248,20 @@ impl AuthnProvider for ConfiguredAuth {
         // actionable reason (e.g. "token expired") instead of a blanket
         // "invalid bearer token". Multiple JWT providers rejecting a token is
         // normal in a multi-issuer setup, so each rejection is logged at debug,
-        // not warn.
+        // not warn. `last_fail` mirrors it as a typed (provider, reason) pair
+        // for the observer's terminal Failure event.
         let mut last_jwt_err: Option<AuthError> = None;
+        let mut last_fail: Option<(String, AuthFailReason)> = None;
 
         for config in self.jwt.iter() {
             // A provider must bind tokens by audience or azp; both empty would
             // accept any signed token from the issuer.
             if config.audience.is_empty() && config.authorized_parties.is_empty() {
-                return Err(AuthError::Internal(format!(
+                self.observe(AuthEvent::Failure {
+                    provider: Some(&config.provider),
+                    reason: AuthFailReason::Misconfigured,
+                });
+                return Err(AuthError::internal(format!(
                     "JWT auth provider {} has neither audience nor authorizedParties configured",
                     config.provider
                 )));
@@ -223,40 +284,54 @@ impl AuthnProvider for ConfiguredAuth {
                 Ok(claims) => claims,
                 Err(e) => {
                     // Don't swallow the reason: log the specific error
-                    // server-side and keep it so the 401 can surface it.
+                    // server-side and keep it (typed + as an AuthError) so both
+                    // the 401 and the observer get the specific cause.
                     tracing::debug!(
                         provider = %config.provider,
                         error = %e,
                         "JWT provider rejected token"
                     );
+                    last_fail = Some((config.provider.clone(), jwt_fail_reason_of(&e)));
                     last_jwt_err = Some(classify_jwt_error(e));
                     continue;
                 }
             };
 
-            let identity = claims
-                .get(&config.identity_claim)
-                .and_then(|v| v.as_str())
-                .ok_or_else(|| {
-                    AuthError::Unauthorized(format!(
+            let identity = match claims.get(&config.identity_claim).and_then(|v| v.as_str()) {
+                Some(identity) => identity.to_string(),
+                None => {
+                    self.observe(AuthEvent::Failure {
+                        provider: Some(&config.provider),
+                        reason: AuthFailReason::MissingIdentityClaim,
+                    });
+                    return Err(AuthError::Unauthorized(format!(
                         "JWT missing string identity claim {}",
                         config.identity_claim
-                    ))
-                })?
-                .to_string();
+                    )));
+                }
+            };
 
-            return Ok(AuthIdentity {
+            let identity = AuthIdentity {
                 provider: config.provider.clone(),
                 identity,
                 method: config.method.clone(),
                 claims,
+            };
+            self.observe(AuthEvent::Success {
+                identity: &identity,
             });
+            return Ok(identity);
         }
 
         // Surface the most specific JWT rejection (e.g. "token expired") when a
         // provider was tried; otherwise no JWT provider matched at all, so fall
         // back to a generic reason. Transport faults are preserved as Internal
         // by `classify_jwt_error`, so a JWKS outage still reads as a 500.
+        let (provider, reason) = match &last_fail {
+            Some((provider, reason)) => (Some(provider.as_str()), *reason),
+            None => (None, AuthFailReason::NoMatchingProvider),
+        };
+        self.observe(AuthEvent::Failure { provider, reason });
         Err(last_jwt_err.unwrap_or_else(|| AuthError::Unauthorized("invalid bearer token".into())))
     }
 }
@@ -272,12 +347,41 @@ impl AuthnProvider for ConfiguredAuth {
 /// message produced in `jwks` (e.g. "token expired", "token audience mismatch").
 fn classify_jwt_error(err: anyhow::Error) -> AuthError {
     if is_jwks_transport_fault(&err) {
-        // Keep the full detail server-side (Internal is logged + redacted in
-        // `into_response`); never leak it to the 401 path.
-        return AuthError::Internal(format!("JWKS fetch/transport failure: {err:#}"));
+        // Keep the full detail server-side: it rides in the error source chain
+        // (logged in `into_response`) while the body/message stay the static,
+        // redaction-safe summary — never leaked to the 401 path.
+        return AuthError::internal_with_source("JWKS fetch/transport failure", err);
     }
     // The top-level message is the specific, safe reason set in `jwks`.
     AuthError::Unauthorized(err.to_string())
+}
+
+/// Derive a typed [`AuthFailReason`] from a `validate_jwt_bound` error, for the
+/// observer hook. Mirrors [`classify_jwt_error`]'s split: transport/structural
+/// JWKS faults are server-side ([`AuthFailReason::ProviderUnavailable`]);
+/// otherwise recover the precise token-level reason from the original
+/// `jsonwebtoken` error preserved in the source chain, falling back to stable
+/// markers for the structural rejections raised as bare `anyhow`.
+fn jwt_fail_reason_of(err: &anyhow::Error) -> AuthFailReason {
+    if is_jwks_transport_fault(err) {
+        return AuthFailReason::ProviderUnavailable;
+    }
+    // `validate_jwt_bound` wraps the original jsonwebtoken error as the source
+    // (`anyhow::Error::new(e).context(reason)`), so downcast to recover the
+    // exact kind without re-parsing the human message.
+    if let Some(jwt) = err.downcast_ref::<JwtError>() {
+        return crate::server::jwks::jwt_fail_reason(jwt);
+    }
+    // Token-level rejections raised as bare `anyhow` (disallowed alg before
+    // decode, unknown `kid`): map the stable markers, else a generic reject.
+    let msg = err.to_string();
+    if msg.contains("unknown signing key") {
+        AuthFailReason::UnknownSigningKey
+    } else if msg.contains("signing algorithm not allowed") {
+        AuthFailReason::AlgorithmNotAllowed
+    } else {
+        AuthFailReason::TokenRejected
+    }
 }
 
 /// Whether the error chain points at a JWKS fetch/transport/structural fault
@@ -431,7 +535,10 @@ mod tests {
         // A JWKS fetch failure is the server's fault (500-class), not the
         // caller's -- it must NOT degrade into a 401.
         let err = anyhow::anyhow!("connection refused").context("Failed to fetch JWKS");
-        assert!(matches!(classify_jwt_error(err), AuthError::Internal(_)));
+        assert!(matches!(
+            classify_jwt_error(err),
+            AuthError::Internal { .. }
+        ));
     }
 
     #[test]
@@ -444,7 +551,7 @@ mod tests {
         ] {
             let err = anyhow::anyhow!("{ctx}");
             assert!(
-                matches!(classify_jwt_error(err), AuthError::Internal(_)),
+                matches!(classify_jwt_error(err), AuthError::Internal { .. }),
                 "expected Internal for {ctx:?}"
             );
         }
@@ -470,7 +577,7 @@ mod tests {
 
         let err = auth.authenticate("some.bearer.token").await.unwrap_err();
         match err {
-            AuthError::Internal(_) => {}
+            AuthError::Internal { .. } => {}
             AuthError::Unauthorized(msg) => {
                 assert_ne!(msg, "invalid bearer token", "reason must be specific");
             }
@@ -490,5 +597,118 @@ mod tests {
             AuthError::Unauthorized(msg) => assert_eq!(msg, "invalid bearer token"),
             other => panic!("expected generic Unauthorized, got {other:?}"),
         }
+    }
+
+    // ── observer hook ─────────────────────────────────────────────────────
+
+    /// A captured event as a `(kind, provider, reason_label)` tuple.
+    type RecordedEvent = (String, Option<String>, Option<String>);
+
+    #[derive(Default)]
+    struct RecordingObserver {
+        events: std::sync::Mutex<Vec<RecordedEvent>>,
+    }
+
+    impl AuthObserver for RecordingObserver {
+        fn observe(&self, event: AuthEvent<'_>) {
+            let row = match event {
+                AuthEvent::Success { identity } => {
+                    ("success".to_string(), Some(identity.provider.clone()), None)
+                }
+                AuthEvent::Failure { provider, reason } => (
+                    "failure".to_string(),
+                    provider.map(str::to_string),
+                    Some(reason.label().to_string()),
+                ),
+            };
+            self.events.lock().unwrap().push(row);
+        }
+    }
+
+    #[tokio::test]
+    async fn observer_sees_static_token_success() {
+        let rec = Arc::new(RecordingObserver::default());
+        let auth = AuthBuilder::new()
+            .static_token("dev-token", "secret", "dev-user")
+            .observer(rec.clone())
+            .build();
+
+        auth.authenticate("secret").await.unwrap();
+        let events = rec.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "success");
+        assert_eq!(events[0].1.as_deref(), Some("dev-token"));
+    }
+
+    #[tokio::test]
+    async fn observer_sees_no_matching_provider_failure() {
+        let rec = Arc::new(RecordingObserver::default());
+        let auth = AuthBuilder::new()
+            .static_token("dev-token", "secret", "dev-user")
+            .observer(rec.clone())
+            .build();
+
+        auth.authenticate("wrong").await.unwrap_err();
+        let events = rec.events.lock().unwrap();
+        assert_eq!(events.len(), 1);
+        assert_eq!(events[0].0, "failure");
+        assert_eq!(
+            events[0].1, None,
+            "no single provider owns the fall-through"
+        );
+        assert_eq!(events[0].2.as_deref(), Some("no_matching_provider"));
+    }
+
+    #[test]
+    fn jwt_fail_reason_of_recovers_precise_kind_through_anyhow_chain() {
+        use jsonwebtoken::errors::{ErrorKind, new_error};
+
+        // Mirror EXACTLY how `validate_jwt_bound` wraps a decode error:
+        // `anyhow::Error::new(jwt_err).context(redaction_safe_reason)`. The
+        // downcast must see through the context layer to the original kind —
+        // otherwise reasons would silently degrade to the TokenRejected
+        // fallback.
+        for (kind, expected) in [
+            (ErrorKind::ExpiredSignature, AuthFailReason::Expired),
+            (ErrorKind::InvalidAudience, AuthFailReason::AudienceMismatch),
+            (ErrorKind::InvalidIssuer, AuthFailReason::IssuerMismatch),
+            (
+                ErrorKind::InvalidSignature,
+                AuthFailReason::InvalidSignature,
+            ),
+        ] {
+            let wrapped =
+                anyhow::Error::new(new_error(kind)).context(AuthFailReason::Expired.message());
+            assert_eq!(
+                jwt_fail_reason_of(&wrapped),
+                expected,
+                "downcast must recover the precise kind through the anyhow context layer"
+            );
+        }
+
+        // Server-side transport fault wins over token-level classification.
+        let transport = anyhow::anyhow!("connection refused").context("Failed to fetch JWKS");
+        assert_eq!(
+            jwt_fail_reason_of(&transport),
+            AuthFailReason::ProviderUnavailable
+        );
+
+        // Bare-anyhow structural rejections map via their stable markers.
+        let kid = anyhow::anyhow!("no key for kid").context("unknown signing key (kid)");
+        assert_eq!(jwt_fail_reason_of(&kid), AuthFailReason::UnknownSigningKey);
+
+        // Anything else is a generic token-level reject, never a server fault.
+        let other = anyhow::anyhow!("something odd");
+        assert_eq!(jwt_fail_reason_of(&other), AuthFailReason::TokenRejected);
+    }
+
+    #[tokio::test]
+    async fn observer_is_optional_and_default_path_is_unaffected() {
+        // No observer registered: must not panic and behavior is unchanged.
+        let auth = AuthBuilder::new()
+            .static_token("dev-token", "secret", "dev-user")
+            .build();
+        assert!(auth.authenticate("secret").await.is_ok());
+        assert!(auth.authenticate("nope").await.is_err());
     }
 }

@@ -185,7 +185,7 @@ pub fn verify_dpop_proof(
     // Step 5: iat skew.
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .map_err(|e| AuthError::Internal(format!("system clock error: {e}")))?
+        .map_err(|e| AuthError::internal_with_source("system clock error", e))?
         .as_secs() as i64;
     let drift = (now - claims.iat).unsigned_abs();
     if drift > max_iat_skew.as_secs() {
