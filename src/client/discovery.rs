@@ -1,18 +1,8 @@
 use super::config::ServiceConfig;
+use crate::common::KunobiAuthDiscovery;
 use anyhow::Context;
-use serde::Deserialize;
 use std::net::IpAddr;
 use std::time::Duration;
-
-/// Response from the service's auth discovery endpoint.
-#[derive(Debug, Deserialize)]
-#[serde(rename_all = "camelCase")]
-struct AuthDiscovery {
-    issuer: String,
-    client_id: String,
-    #[serde(default)]
-    audience: Option<String>,
-}
 
 /// Fetch auth configuration from a Kunobi service.
 ///
@@ -45,7 +35,7 @@ pub async fn discover(endpoint: &str) -> anyhow::Result<ServiceConfig> {
         );
     }
 
-    let discovery: AuthDiscovery = response.json().await?;
+    let discovery: KunobiAuthDiscovery = response.json().await?;
 
     Ok(ServiceConfig {
         endpoint: endpoint.to_string(),
