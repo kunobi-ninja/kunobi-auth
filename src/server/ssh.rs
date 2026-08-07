@@ -59,8 +59,18 @@ pub struct SshSignatureHeader {
 /// Parse an `SSH-Signature` header value of the form:
 /// `fingerprint="...",timestamp="...",nonce="...",signature="base64..."`
 ///
+/// An optional leading `SSH-Signature ` scheme token (case-insensitive) is
+/// accepted and stripped, so the full credentials string produced by the
+/// client's `authorize()` can be fed in verbatim.
+///
 /// Unknown keys are silently ignored for forward compatibility.
 pub fn parse_ssh_auth_header(header: &str) -> Result<SshSignatureHeader, AuthError> {
+    let header = header.trim_start();
+    let header = match header.split_once(|c: char| c.is_ascii_whitespace()) {
+        Some((scheme, rest)) if scheme.eq_ignore_ascii_case("SSH-Signature") => rest,
+        _ => header,
+    };
+
     let mut fingerprint: Option<String> = None;
     let mut timestamp: Option<String> = None;
     let mut nonce: Option<String> = None;
@@ -156,12 +166,16 @@ pub fn split_header_params(header: &str) -> Vec<String> {
 /// exceed `max_age`.
 ///
 /// **Configuration contract**: pair `max_age` with the `max_drift` you pass
-/// to [`verify_ssh_signature`]. A captured request stays drift-valid from
-/// `ts - max_drift` until `ts + MAX_FUTURE_CLOCK_SKEW`, so the effective
-/// replay window is `max_drift + MAX_FUTURE_CLOCK_SKEW` (≈ `max_drift + 5s`
-/// at default `MAX_FUTURE_CLOCK_SKEW`). Set `max_age >= max_drift` to be
-/// safe; setting `max_age` shorter creates a window where drift still
-/// passes but the nonce has been forgotten -- a replay primitive.
+/// to [`verify_ssh_signature`]. A request first seen at server time `t0` can
+/// carry `ts` up to `t0 + MAX_FUTURE_CLOCK_SKEW`, and stays drift-valid until
+/// `ts + max_drift` — i.e. up to `t0 + max_drift + MAX_FUTURE_CLOCK_SKEW`.
+/// The tracker must remember the nonce for that whole span, so `max_age`
+/// must *exceed* `max_drift + MAX_FUTURE_CLOCK_SKEW` (strictly: the drift
+/// check accepts `past_drift == max_drift` while the tracker forgets at
+/// `elapsed == max_age`, so add at least one extra second). Anything shorter
+/// creates a window where drift still passes but the nonce has been
+/// forgotten -- a replay primitive. Prefer [`NonceTracker::for_drift`],
+/// which derives a safe `max_age` from `max_drift`.
 ///
 /// **Call ordering (important)**: verify the signature with
 /// [`verify_ssh_signature`] *first*, and only call [`Self::check_and_insert`]
@@ -185,10 +199,22 @@ impl NonceTracker {
     /// Create a new tracker where nonces are valid for `max_age`.
     ///
     /// See [`NonceTracker`] type docs for the relationship with
-    /// [`verify_ssh_signature`]'s `max_drift` parameter -- in short, prefer
-    /// `max_age >= max_drift`.
+    /// [`verify_ssh_signature`]'s `max_drift` parameter -- in short,
+    /// `max_age` must exceed `max_drift + MAX_FUTURE_CLOCK_SKEW`. Prefer
+    /// [`Self::for_drift`], which derives a safe value.
     pub fn new(max_age: Duration) -> Self {
         Self::new_bounded(max_age, NONCE_TRACKER_MAX_ENTRIES)
+    }
+
+    /// Create a tracker whose retention is derived from the `max_drift` you
+    /// pass to [`verify_ssh_signature`], satisfying the configuration
+    /// contract by construction: nonces are remembered for
+    /// `max_drift + MAX_FUTURE_CLOCK_SKEW + 1s`, covering the full span a
+    /// captured request can remain drift-valid (the extra second absorbs the
+    /// `>` vs `<` boundary asymmetry between the drift check and the replay
+    /// window).
+    pub fn for_drift(max_drift: Duration) -> Self {
+        Self::new(max_drift + MAX_FUTURE_CLOCK_SKEW + Duration::from_secs(1))
     }
 
     /// Create a nonce tracker with an explicit maximum number of live entries.
@@ -384,10 +410,12 @@ pub fn verify_ssh_signature(
     // `max_age` configured by the caller; if `max_age < 2*max_drift`, the
     // nonce expires before the drift window closes -- replay-able. Bounding
     // future drift to a small constant collapses the effective window to
-    // `max_drift + MAX_FUTURE_CLOCK_SKEW`, so any sane `max_age >= max_drift`
-    // closes the loop.
+    // `max_drift + MAX_FUTURE_CLOCK_SKEW`; a `max_age` exceeding that (see
+    // `NonceTracker::for_drift`) closes the loop.
+    // Saturating: the timestamp is attacker-controlled and checked before the
+    // signature, so extremes like `i64::MIN` must reject, not overflow.
     if ts_secs > now_secs {
-        let future_drift = (ts_secs - now_secs) as u64;
+        let future_drift = ts_secs.saturating_sub(now_secs) as u64;
         if future_drift > MAX_FUTURE_CLOCK_SKEW.as_secs() {
             return Err(AuthError::Unauthorized(format!(
                 "timestamp is {future_drift}s in the future; max future skew is {}s",
@@ -395,7 +423,7 @@ pub fn verify_ssh_signature(
             )));
         }
     } else {
-        let past_drift = (now_secs - ts_secs) as u64;
+        let past_drift = now_secs.saturating_sub(ts_secs) as u64;
         if past_drift > max_drift.as_secs() {
             return Err(AuthError::Unauthorized(format!(
                 "timestamp is {past_drift}s in the past; max past drift is {}s",
@@ -549,6 +577,54 @@ mod tests {
         format!(
             r#"fingerprint="SHA256:abc123",timestamp="1700000000",nonce="deadbeef",signature="{sig_b64}""#
         )
+    }
+
+    #[test]
+    fn test_parse_header_with_scheme_prefix() {
+        // The client's `authorize()` emits the full credentials form,
+        // including the scheme token; the parser must accept it verbatim.
+        for scheme in ["SSH-Signature", "ssh-signature", "SSH-SIGNATURE"] {
+            let h = parse_ssh_auth_header(&format!("{scheme} {}", sample_header_str())).unwrap();
+            assert_eq!(h.fingerprint, "SHA256:abc123");
+            assert_eq!(h.timestamp, "1700000000");
+        }
+    }
+
+    #[test]
+    fn test_parse_header_scheme_prefix_not_required() {
+        // A non-scheme first token must not be swallowed.
+        let err = parse_ssh_auth_header("NotTheScheme fingerprint=\"x\"").unwrap_err();
+        assert!(matches!(err, AuthError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn test_extreme_negative_timestamp_rejected_without_overflow() {
+        // The timestamp is attacker-controlled and checked before the
+        // signature; i64::MIN must reject cleanly, not overflow.
+        let header = SshSignatureHeader {
+            fingerprint: "SHA256:abc".into(),
+            timestamp: i64::MIN.to_string(),
+            nonce: "n0".into(),
+            signature: vec![],
+        };
+        let err = verify_ssh_signature(
+            &header,
+            "ns",
+            "GET",
+            "/x",
+            b"",
+            &[],
+            Duration::from_secs(300),
+        )
+        .unwrap_err();
+        assert!(matches!(err, AuthError::Unauthorized(_)));
+    }
+
+    #[test]
+    fn test_for_drift_retention_covers_replay_window() {
+        // max_drift + MAX_FUTURE_CLOCK_SKEW + 1s boundary margin.
+        let t = NonceTracker::for_drift(Duration::from_secs(300));
+        assert_eq!(t.max_age, Duration::from_secs(306));
     }
 
     #[test]

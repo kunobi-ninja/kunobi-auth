@@ -387,25 +387,19 @@ fn jwt_fail_reason_of(err: &anyhow::Error) -> AuthFailReason {
 /// Whether the error chain points at a JWKS fetch/transport/structural fault
 /// (server-side) rather than a token validation failure (caller-side).
 fn is_jwks_transport_fault(err: &anyhow::Error) -> bool {
-    // A reqwest error anywhere in the chain is a definitive transport fault.
-    if err.chain().any(|cause| cause.is::<reqwest::Error>()) {
+    // `jwks::get_keys` failures carry a typed `JwksFault` marker in the
+    // context chain; detect it by downcast. Never classify on message text —
+    // the chain embeds attacker-controlled values (e.g. the JWT header `kid`),
+    // so substring matching would let an unauthenticated caller flip 401s
+    // into 500s with a crafted `kid`.
+    if err
+        .downcast_ref::<crate::server::jwks::JwksFault>()
+        .is_some()
+    {
         return true;
     }
-    // The remaining JWKS server-side faults are raised via `anyhow` with these
-    // stable context/message prefixes (see `jwks::get_keys` /
-    // `validate_remote_auth_url`). Match on those so a misbehaving IdP or a
-    // misconfigured JWKS URL reads as a 500, not a 401.
-    const JWKS_FAULT_MARKERS: [&str; 5] = [
-        "Failed to fetch JWKS",
-        "Failed to read JWKS response body",
-        "Failed to parse JWKS",
-        "JWKS response exceeds",
-        "JWKS URL",
-    ];
-    err.chain().any(|cause| {
-        let msg = cause.to_string();
-        JWKS_FAULT_MARKERS.iter().any(|marker| msg.contains(marker))
-    })
+    // A reqwest error anywhere in the chain is a definitive transport fault.
+    err.chain().any(|cause| cause.is::<reqwest::Error>())
 }
 
 #[cfg(test)]
@@ -534,7 +528,9 @@ mod tests {
     fn classify_jwt_error_keeps_transport_faults_as_internal() {
         // A JWKS fetch failure is the server's fault (500-class), not the
         // caller's -- it must NOT degrade into a 401.
-        let err = anyhow::anyhow!("connection refused").context("Failed to fetch JWKS");
+        let err = anyhow::anyhow!("connection refused")
+            .context("Failed to fetch JWKS")
+            .context(crate::server::jwks::JwksFault);
         assert!(matches!(
             classify_jwt_error(err),
             AuthError::Internal { .. }
@@ -549,12 +545,34 @@ mod tests {
             "JWKS response exceeds the 1048576-byte limit",
             "JWKS URL must use https outside loopback/test hosts: http://idp/jwks",
         ] {
-            let err = anyhow::anyhow!("{ctx}");
+            let err = anyhow::anyhow!("{ctx}").context(crate::server::jwks::JwksFault);
             assert!(
                 matches!(classify_jwt_error(err), AuthError::Internal { .. }),
                 "expected Internal for {ctx:?}"
             );
         }
+    }
+
+    #[test]
+    fn classify_jwt_error_ignores_fault_markers_in_untrusted_text() {
+        // The JWT header `kid` is attacker-controlled and is embedded in the
+        // error chain; text resembling a fault marker must NOT flip the 401
+        // into a 500 (false "IdP down" signal). Only the typed `JwksFault`
+        // marker (or a real reqwest error) classifies as transport fault.
+        let err = anyhow::anyhow!("No signing key found with kid: Failed to fetch JWKS")
+            .context("unknown signing key (kid)");
+        assert!(matches!(
+            classify_jwt_error(err),
+            AuthError::Unauthorized(_)
+        ));
+
+        let err = anyhow::anyhow!("No signing key found with kid: JWKS URL")
+            .context("unknown signing key (kid)");
+        assert_eq!(
+            jwt_fail_reason_of(&err),
+            AuthFailReason::UnknownSigningKey,
+            "crafted kid must not read as ProviderUnavailable"
+        );
     }
 
     #[tokio::test]
@@ -687,7 +705,9 @@ mod tests {
         }
 
         // Server-side transport fault wins over token-level classification.
-        let transport = anyhow::anyhow!("connection refused").context("Failed to fetch JWKS");
+        let transport = anyhow::anyhow!("connection refused")
+            .context("Failed to fetch JWKS")
+            .context(crate::server::jwks::JwksFault);
         assert_eq!(
             jwt_fail_reason_of(&transport),
             AuthFailReason::ProviderUnavailable

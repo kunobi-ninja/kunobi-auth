@@ -187,7 +187,9 @@ pub fn verify_dpop_proof(
         .duration_since(UNIX_EPOCH)
         .map_err(|e| AuthError::internal_with_source("system clock error", e))?
         .as_secs() as i64;
-    let drift = (now - claims.iat).unsigned_abs();
+    // Saturating: `iat` is attacker-controlled (the proof is self-signed), so
+    // e.g. `iat == i64::MIN` must reject, not overflow.
+    let drift = now.saturating_sub(claims.iat).unsigned_abs();
     if drift > max_iat_skew.as_secs() {
         return Err(AuthError::Unauthorized(format!(
             "DPoP iat drift of {drift}s exceeds maximum of {}s",
@@ -369,6 +371,23 @@ CIAe12xZratKWzRoekhOUBIDCZChRANCAAQitjpgInyqDv9dQ4D0FZ4SiZX+KaqP
         assert_eq!(t1, t2);
         // 32-byte SHA-256 in base64url-no-pad is 43 characters.
         assert_eq!(t1.len(), 43);
+    }
+
+    #[test]
+    fn rejects_extreme_iat_without_overflow() {
+        // `iat` is attacker-controlled (the proof is self-signed); i64::MIN
+        // must reject cleanly, not overflow the drift subtraction.
+        let proof = make_proof("POST", "https://api.example.com/x", i64::MIN, "j-min", None);
+        let err = verify_dpop_proof(
+            &proof,
+            "POST",
+            "https://api.example.com/x",
+            None,
+            None,
+            Duration::from_secs(60),
+        )
+        .unwrap_err();
+        assert!(matches!(err, AuthError::Unauthorized(_)));
     }
 
     #[test]
