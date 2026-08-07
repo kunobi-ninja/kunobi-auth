@@ -1,12 +1,18 @@
 //! Trust-on-first-use (TOFU) store for pinning a service's issuer + audience.
 //!
-//! On first connection to a service its issuer and audience are recorded via
-//! [`TofuStore::trust`]. Subsequent connections check that what's presented
-//! still matches what was stored. A mismatch signals a potential MITM:
-//! [`TofuStore::verify`] reports it as [`TofuResult::AudienceChanged`] (a
-//! status you can act on), while [`TofuStore::verify_or_reject`] is a strict,
-//! **fail-closed** gate that returns `Err` on any mismatch *or* on an unpinned
-//! service — so a caller cannot silently trust a new or changed endpoint.
+//! On first connection to a service its issuer and audience are recorded.
+//! Subsequent connections check that what's presented still matches what was
+//! stored. A mismatch signals a potential MITM. Three gates, by strictness:
+//!
+//! - [`TofuStore::check_and_pin`] — automatic TOFU: pins unknown endpoints,
+//!   errors on any change. This is what [`crate::client::discover`] applies
+//!   by default.
+//! - [`TofuStore::verify`] — reports a status ([`TofuResult::IssuerChanged`] /
+//!   [`TofuResult::AudienceChanged`] / …) you can act on, e.g. to prompt the
+//!   user before calling [`TofuStore::trust`].
+//! - [`TofuStore::verify_or_reject`] — strict, **fail-closed**: `Err` on any
+//!   mismatch *or* on an unpinned service, so a caller cannot silently trust
+//!   a new or changed endpoint.
 //!
 //! The store is process-local-locked (`std::sync::Mutex`) and writes are
 //! atomic via `tempfile::persist`, so concurrent `verify`/`trust` calls
@@ -40,13 +46,21 @@ pub struct KnownService {
 
 /// Result of a TOFU verification check.
 #[derive(Debug)]
+#[non_exhaustive]
 pub enum TofuResult {
     /// The endpoint has never been seen before.
     FirstConnect { endpoint: String, audience: String },
-    /// The endpoint is known and the audience matches.
+    /// The endpoint is known and both issuer and audience match.
     Trusted,
     /// The endpoint is known but the audience has changed.
     AudienceChanged {
+        endpoint: String,
+        previous: String,
+        current: String,
+    },
+    /// The endpoint is known but the issuer has changed (possible MITM
+    /// steering the client onto an attacker-controlled IdP).
+    IssuerChanged {
         endpoint: String,
         previous: String,
         current: String,
@@ -89,11 +103,14 @@ impl TofuStore {
         }
     }
 
-    /// Verify an endpoint + audience pair against the store.
+    /// Verify an endpoint + issuer + audience triple against the store.
     ///
     /// Does NOT automatically record the entry — call [`Self::trust`] after
-    /// prompting the user.
-    pub fn verify(&self, endpoint: &str, audience: &str) -> Result<TofuResult> {
+    /// prompting the user. An issuer change is reported before an audience
+    /// change (it is the stronger MITM signal). A legacy entry pinned before
+    /// issuer support (empty stored issuer) skips the issuer comparison; call
+    /// [`Self::trust`] to upgrade such a pin.
+    pub fn verify(&self, endpoint: &str, issuer: &str, audience: &str) -> Result<TofuResult> {
         let _guard = self
             .lock
             .lock()
@@ -105,6 +122,13 @@ impl TofuStore {
                 endpoint: endpoint.to_string(),
                 audience: audience.to_string(),
             }),
+            Some(entry) if !entry.issuer.is_empty() && entry.issuer != issuer => {
+                Ok(TofuResult::IssuerChanged {
+                    endpoint: endpoint.to_string(),
+                    previous: entry.issuer.clone(),
+                    current: issuer.to_string(),
+                })
+            }
             Some(entry) if entry.audience == audience => Ok(TofuResult::Trusted),
             Some(entry) => Ok(TofuResult::AudienceChanged {
                 endpoint: endpoint.to_string(),
@@ -112,6 +136,72 @@ impl TofuStore {
                 current: audience.to_string(),
             }),
         }
+    }
+
+    /// Fail-closed *automatic* TOFU gate: pin on first contact, verify
+    /// afterwards, reject on any change.
+    ///
+    /// - Unknown endpoint → pinned now, returns [`TofuResult::FirstConnect`].
+    /// - Known endpoint, issuer + audience match → returns
+    ///   [`TofuResult::Trusted`] (and refreshes `last_seen`).
+    /// - Legacy entry pinned without an issuer → upgraded in place when the
+    ///   audience still matches (mirrors [`Self::trust`]'s upgrade path).
+    /// - Issuer or audience mismatch → `Err` (possible MITM); resolving it
+    ///   requires an explicit [`Self::trust`] call, e.g. after prompting.
+    ///
+    /// This is what the crate's own discovery flow uses; use
+    /// [`Self::verify`] + [`Self::trust`] instead when you want to prompt the
+    /// user before pinning.
+    pub fn check_and_pin(
+        &self,
+        endpoint: &str,
+        issuer: &str,
+        audience: &str,
+    ) -> Result<TofuResult> {
+        let _guard = self
+            .lock
+            .lock()
+            .map_err(|_| anyhow::anyhow!("TOFU store mutex poisoned"))?;
+        let mut known = self.load_locked()?;
+        let now = now_rfc3339();
+
+        let Some(entry) = known.get_mut(endpoint) else {
+            known.insert(
+                endpoint.to_string(),
+                KnownService {
+                    issuer: issuer.to_string(),
+                    audience: audience.to_string(),
+                    first_seen: now.clone(),
+                    last_seen: now,
+                },
+            );
+            self.save_locked(&known)?;
+            return Ok(TofuResult::FirstConnect {
+                endpoint: endpoint.to_string(),
+                audience: audience.to_string(),
+            });
+        };
+
+        if !entry.issuer.is_empty() && entry.issuer != issuer {
+            anyhow::bail!(
+                "TOFU: issuer changed for {endpoint} (possible MITM): pinned {pinned:?}, presented {issuer:?}. \
+                 If this change is expected, re-establish trust explicitly with trust()",
+                pinned = entry.issuer
+            );
+        }
+        if entry.audience != audience {
+            anyhow::bail!(
+                "TOFU: audience changed for {endpoint} (possible MITM): pinned {pinned:?}, presented {audience:?}. \
+                 If this change is expected, re-establish trust explicitly with trust()",
+                pinned = entry.audience
+            );
+        }
+
+        // Match (or legacy issuer upgrade): refresh the pin's metadata.
+        entry.issuer = issuer.to_string();
+        entry.last_seen = now;
+        self.save_locked(&known)?;
+        Ok(TofuResult::Trusted)
     }
 
     /// Fail-closed trust gate: returns `Ok(())` **only** when `endpoint` is
@@ -288,7 +378,7 @@ mod tests {
     fn test_first_connect() {
         let store = temp_store();
         let result = store
-            .verify("https://api.example.com", "api://example")
+            .verify("https://api.example.com", "https://idp", "api://example")
             .unwrap();
         assert!(
             matches!(result, TofuResult::FirstConnect { .. }),
@@ -304,7 +394,7 @@ mod tests {
             .unwrap();
 
         let result = store
-            .verify("https://api.example.com", "api://example")
+            .verify("https://api.example.com", "https://idp", "api://example")
             .unwrap();
         assert!(
             matches!(result, TofuResult::Trusted),
@@ -324,7 +414,11 @@ mod tests {
             .unwrap();
 
         let result = store
-            .verify("https://api.example.com", "api://new-audience")
+            .verify(
+                "https://api.example.com",
+                "https://idp",
+                "api://new-audience",
+            )
             .unwrap();
 
         match result {
@@ -336,6 +430,87 @@ mod tests {
             }
             other => panic!("expected AudienceChanged, got {other:?}"),
         }
+    }
+
+    #[test]
+    fn test_issuer_changed_reported_before_audience() {
+        let store = temp_store();
+        store
+            .trust("https://api.example.com", "https://idp", "aud")
+            .unwrap();
+
+        // Both issuer and audience differ: the issuer change must win.
+        let result = store
+            .verify("https://api.example.com", "https://evil-idp", "other-aud")
+            .unwrap();
+        match result {
+            TofuResult::IssuerChanged {
+                previous, current, ..
+            } => {
+                assert_eq!(previous, "https://idp");
+                assert_eq!(current, "https://evil-idp");
+            }
+            other => panic!("expected IssuerChanged, got {other:?}"),
+        }
+    }
+
+    // ── check_and_pin: automatic fail-closed TOFU ─────────────────────────
+
+    #[test]
+    fn check_and_pin_pins_on_first_contact_then_trusts() {
+        let store = temp_store();
+        let first = store
+            .check_and_pin("https://api.example.com", "https://idp", "aud")
+            .unwrap();
+        assert!(matches!(first, TofuResult::FirstConnect { .. }));
+
+        let second = store
+            .check_and_pin("https://api.example.com", "https://idp", "aud")
+            .unwrap();
+        assert!(matches!(second, TofuResult::Trusted));
+    }
+
+    #[test]
+    fn check_and_pin_rejects_issuer_change() {
+        let store = temp_store();
+        store
+            .check_and_pin("https://api.example.com", "https://idp", "aud")
+            .unwrap();
+        let err = store
+            .check_and_pin("https://api.example.com", "https://evil-idp", "aud")
+            .unwrap_err();
+        assert!(err.to_string().contains("issuer changed"), "{err}");
+    }
+
+    #[test]
+    fn check_and_pin_rejects_audience_change() {
+        let store = temp_store();
+        store
+            .check_and_pin("https://api.example.com", "https://idp", "aud")
+            .unwrap();
+        let err = store
+            .check_and_pin("https://api.example.com", "https://idp", "other")
+            .unwrap_err();
+        assert!(err.to_string().contains("audience changed"), "{err}");
+    }
+
+    #[test]
+    fn check_and_pin_upgrades_legacy_entry_without_issuer() {
+        let store = temp_store();
+        // Simulate a pre-issuer pin: trust with an empty issuer.
+        store.trust("https://api.example.com", "", "aud").unwrap();
+
+        // Same audience: the pin upgrades in place with the presented issuer…
+        let result = store
+            .check_and_pin("https://api.example.com", "https://idp", "aud")
+            .unwrap();
+        assert!(matches!(result, TofuResult::Trusted));
+
+        // …and from then on the issuer is enforced.
+        let err = store
+            .check_and_pin("https://api.example.com", "https://other-idp", "aud")
+            .unwrap_err();
+        assert!(err.to_string().contains("issuer changed"), "{err}");
     }
 
     #[cfg(unix)]
@@ -442,8 +617,11 @@ mod tests {
             }
         }"#;
         std::fs::write(&store.path, legacy_json).unwrap();
-        // verify() (audience-only) still works against the legacy entry.
-        let result = store.verify("https://api.example.com", "aud").unwrap();
+        // verify() still works against the legacy entry: the empty stored
+        // issuer skips the issuer comparison rather than reporting a change.
+        let result = store
+            .verify("https://api.example.com", "https://idp", "aud")
+            .unwrap();
         assert!(matches!(result, TofuResult::Trusted));
     }
 }

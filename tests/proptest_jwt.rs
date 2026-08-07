@@ -45,6 +45,11 @@ CIAe12xZratKWzRoekhOUBIDCZChRANCAAQitjpgInyqDv9dQ4D0FZ4SiZX+KaqP
 const TEST_X: &str = "IrY6YCJ8qg7_XUOA9BWeEomV_imqj-Lkv6sbU0KD3y4";
 const TEST_Y: &str = "vJqYUpLxJhr-67SFxL4BLDHJPGwwE24yl0EEL6YsE44";
 
+// A second, unrelated P-256 public key (private half discarded). Listed FIRST
+// in the served JWKS so kid-less validation must try beyond the first key.
+const DECOY_X: &str = "ivbIJC0b-Z0aJDsH3_r8B9nw7cPWm8OtGnybH8iS2k4";
+const DECOY_Y: &str = "7kdp3cRFJ1nrEmtVvburerJ8LvTd3pGv3GQ8PusCLew";
+
 /// Spawned JWKS server. Lives for the whole test process so we don't spin
 /// it up per-property -- 256 spins per property would be wasteful.
 struct TestIdp {
@@ -69,11 +74,30 @@ impl TestIdp {
         let key = EncodingKey::from_ec_pem(TEST_PRIV_PEM.as_bytes()).unwrap();
         jsonwebtoken::encode(&header, claims, &key).unwrap()
     }
+
+    /// Like [`Self::issue`] but with no `kid` header — RFC 7515 §4.1.4 makes
+    /// it optional, so validation must try every JWKS candidate key.
+    fn issue_without_kid(&self, claims: &serde_json::Value) -> String {
+        kunobi_auth::ensure_crypto_provider();
+        let header = Header::new(jsonwebtoken::Algorithm::ES256);
+        let key = EncodingKey::from_ec_pem(TEST_PRIV_PEM.as_bytes()).unwrap();
+        jsonwebtoken::encode(&header, claims, &key).unwrap()
+    }
 }
 
 async fn jwks_handler() -> axum::Json<serde_json::Value> {
+    // The decoy key comes first: a kid-less token signed with the real key
+    // must not be rejected just because the first candidate fails.
     axum::Json(json!({
         "keys": [{
+            "kty": "EC",
+            "crv": "P-256",
+            "kid": "kunobi-test-decoy",
+            "alg": "ES256",
+            "use": "sig",
+            "x": DECOY_X,
+            "y": DECOY_Y,
+        }, {
             "kty": "EC",
             "crv": "P-256",
             "kid": TEST_KID,
@@ -129,6 +153,60 @@ fn validate_blocking(
 
 fn now_unix() -> i64 {
     chrono::Utc::now().timestamp()
+}
+
+/// A kid-less token signed by the *second* key in the served JWKS must
+/// validate: `kid` is optional (RFC 7515 §4.1.4), so validation tries every
+/// candidate key instead of only the first.
+#[test]
+fn kidless_token_validates_against_multi_key_jwks() {
+    let idp = test_idp();
+    let now = now_unix();
+    let claims = json!({
+        "iss": idp.issuer(),
+        "aud": "test-aud",
+        "sub": "test-user",
+        "exp": now + 600,
+        "iat": now,
+    });
+    let token = idp.issue_without_kid(&claims);
+    let validated = validate_blocking(
+        &JwksManager::new(),
+        &token,
+        &idp.issuer(),
+        &["test-aud".to_string()],
+    )
+    .expect("kid-less token signed by a non-first JWKS key must validate");
+    assert_eq!(
+        validated.get("sub").and_then(|v| v.as_str()),
+        Some("test-user")
+    );
+}
+
+/// A kid-less token that no JWKS key verifies must still be rejected.
+#[test]
+fn kidless_token_with_bad_signature_rejects() {
+    let idp = test_idp();
+    let now = now_unix();
+    let claims = json!({
+        "iss": idp.issuer(),
+        "aud": "test-aud",
+        "exp": now + 600,
+    });
+    let mut token = idp.issue_without_kid(&claims);
+    // Corrupt the signature.
+    token.replace_range(token.len() - 4.., "AAAA");
+    let err = validate_blocking(
+        &JwksManager::new(),
+        &token,
+        &idp.issuer(),
+        &["test-aud".to_string()],
+    )
+    .unwrap_err();
+    assert!(
+        err.to_string().contains("token signature invalid"),
+        "got: {err}"
+    );
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

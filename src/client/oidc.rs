@@ -49,6 +49,10 @@ pub async fn browser_login(
 ) -> Result<StoredToken> {
     info!(issuer = %issuer, "Starting OIDC browser login");
 
+    // Authorization codes and refresh tokens transit this issuer's endpoints;
+    // never allow plaintext transport outside loopback.
+    crate::client::discovery::enforce_secure_transport(issuer, "OIDC issuer")?;
+
     let http_client = build_http_client()?;
 
     let issuer_url = IssuerUrl::new(issuer.to_string()).context("Invalid issuer URL")?;
@@ -91,7 +95,9 @@ pub async fn browser_login(
 
     let (auth_url, csrf_token, _nonce) = auth_request.url();
 
-    let (tx, rx) = oneshot::channel::<(String, String)>();
+    // Ok(code) on success; Err(message) when the IdP redirected back with an
+    // OAuth2 error (RFC 6749 §4.1.2.1) or without a code.
+    let (tx, rx) = oneshot::channel::<Result<String, String>>();
     let tx = std::sync::Arc::new(tokio::sync::Mutex::new(Some(tx)));
 
     let expected_state = csrf_token.secret().clone();
@@ -103,15 +109,47 @@ pub async fn browser_login(
             let tx = tx_clone.clone();
             let expected = expected_state.clone();
             async move {
-                let code = params.get("code").cloned().unwrap_or_default();
                 let state = params.get("state").cloned().unwrap_or_default();
 
+                // State check comes first, before consuming the oneshot, so a
+                // stray request to the port cannot kill or hijack the flow.
                 if state != expected {
                     return Html("<h1>Error</h1><p>Invalid state parameter.</p>".to_string());
                 }
 
+                // Surface an IdP error response (e.g. the user clicked Deny)
+                // instead of proceeding with an empty code and failing later
+                // with an opaque "Token exchange failed".
+                if let Some(error) = params.get("error") {
+                    let description = params
+                        .get("error_description")
+                        .map(String::as_str)
+                        .unwrap_or("");
+                    let message = if description.is_empty() {
+                        error.clone()
+                    } else {
+                        format!("{error}: {description}")
+                    };
+                    if let Some(sender) = tx.lock().await.take() {
+                        let _ = sender.send(Err(message.clone()));
+                    }
+                    return Html(format!(
+                        "<h1>Authentication failed</h1><p>{}</p>",
+                        html_escape(&message)
+                    ));
+                }
+
+                let Some(code) = params.get("code").filter(|c| !c.is_empty()).cloned() else {
+                    if let Some(sender) = tx.lock().await.take() {
+                        let _ = sender.send(Err("callback carried no authorization code".into()));
+                    }
+                    return Html(
+                        "<h1>Error</h1><p>Callback carried no authorization code.</p>".to_string(),
+                    );
+                };
+
                 if let Some(sender) = tx.lock().await.take() {
-                    let _ = sender.send((code, state));
+                    let _ = sender.send(Ok(code));
                 }
 
                 Html(
@@ -147,10 +185,11 @@ pub async fn browser_login(
 
     println!("Waiting for authentication in browser...");
 
-    let (code, _state) = tokio::time::timeout(std::time::Duration::from_secs(120), rx)
+    let code = tokio::time::timeout(std::time::Duration::from_secs(120), rx)
         .await
         .context("Login timed out after 120 seconds")?
-        .context("Callback channel closed")?;
+        .context("Callback channel closed")?
+        .map_err(|e| anyhow::anyhow!("IdP returned an error on the callback: {e}"))?;
 
     server.abort();
 
@@ -199,6 +238,8 @@ pub async fn refresh(
     refresh_token: &str,
 ) -> Result<StoredToken> {
     info!(issuer = %issuer, "Refreshing OIDC token");
+
+    crate::client::discovery::enforce_secure_transport(issuer, "OIDC issuer")?;
 
     let http_client = build_http_client()?;
 
@@ -391,6 +432,7 @@ async fn introspection_endpoint(issuer: &str) -> Result<Option<String>> {
 }
 
 async fn fetch_revocation_disco(issuer: &str) -> Result<RevocationDiscovery> {
+    crate::client::discovery::enforce_secure_transport(issuer, "OIDC issuer")?;
     let well_known = format!(
         "{}/.well-known/openid-configuration",
         issuer.trim_end_matches('/')
@@ -548,6 +590,18 @@ pub async fn begin_device_flow_with_url(
 ) -> Result<DeviceFlowHandle> {
     info!(issuer = %issuer, "Starting OIDC device authorization flow");
 
+    // Device codes and the resulting tokens transit these endpoints; never
+    // allow plaintext transport outside loopback. (When called via
+    // `begin_device_flow` these all derive from the issuer's discovery doc,
+    // but this entry point accepts them directly.)
+    for (url, what) in [
+        (device_endpoint, "device authorization endpoint"),
+        (token_endpoint, "token endpoint"),
+        (jwks_uri, "jwks_uri"),
+    ] {
+        crate::client::discovery::enforce_secure_transport(url, what)?;
+    }
+
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(30))
@@ -583,14 +637,18 @@ pub async fn begin_device_flow_with_url(
     // glacial polling (which would make the user wait forever).
     let server_interval = auth.interval.unwrap_or(5);
     let interval = Duration::from_secs(server_interval.clamp(5, 60));
-    let expires_at = Instant::now() + Duration::from_secs(auth.expires_in);
+    // Clamp `expires_in` too: it is IdP-supplied and unvalidated, and an
+    // absurd value must not overflow the `Instant` arithmetic below. 24h
+    // comfortably exceeds any real device-code lifetime (typically 5-15 min).
+    let expires_in = Duration::from_secs(auth.expires_in.min(86_400));
+    let expires_at = Instant::now() + expires_in;
 
     Ok(DeviceFlowHandle {
         prompt: DeviceFlowPrompt {
             verification_uri: auth.verification_uri,
             verification_uri_complete: auth.verification_uri_complete,
             user_code: auth.user_code,
-            expires_in: Duration::from_secs(auth.expires_in),
+            expires_in,
         },
         issuer: issuer.to_string(),
         token_endpoint: token_endpoint.to_string(),
@@ -727,6 +785,7 @@ async fn finalize_device_token(
 }
 
 async fn fetch_discovery(issuer: &str) -> Result<DiscoveryDoc> {
+    crate::client::discovery::enforce_secure_transport(issuer, "OIDC issuer")?;
     let well_known = format!(
         "{}/.well-known/openid-configuration",
         issuer.trim_end_matches('/')
@@ -750,6 +809,21 @@ async fn fetch_discovery(issuer: &str) -> Result<DiscoveryDoc> {
         .with_context(|| format!("parsing {well_known}"))?;
     ensure_discovery_issuer_matches(issuer, &doc.issuer)?;
     Ok(doc)
+}
+
+/// Minimal HTML escaping for text reflected into the callback response page.
+#[cfg(feature = "browser-login")]
+fn html_escape(s: &str) -> String {
+    s.chars()
+        .map(|c| match c {
+            '&' => "&amp;".to_string(),
+            '<' => "&lt;".to_string(),
+            '>' => "&gt;".to_string(),
+            '"' => "&quot;".to_string(),
+            '\'' => "&#39;".to_string(),
+            c => c.to_string(),
+        })
+        .collect()
 }
 
 fn ensure_discovery_issuer_matches(configured: &str, advertised: &str) -> Result<()> {
