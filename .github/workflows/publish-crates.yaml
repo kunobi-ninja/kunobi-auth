@@ -28,7 +28,7 @@ jobs:
       CARGO_TERM_COLOR: always
       RELEASE_TAG: ${{ github.event.release.tag_name }}
     steps:
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: ${{ github.event.release.tag_name }}
 
@@ -56,7 +56,7 @@ jobs:
         id: auth
         # Pinned to v1.0.4: the floating @v1 tag still runs on the deprecated
         # Node 20 runtime; v1.0.4 is the first node24 release.
-        uses: rust-lang/crates-io-auth-action@v1.0.4
+        uses: rust-lang/crates-io-auth-action@v1.0.5
 
       - name: Publish kunobi-auth
         env:
