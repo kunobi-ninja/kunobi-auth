@@ -415,7 +415,9 @@ fn validation_rejects_plaintext_remote_jwks_url() {
         &["test-aud".to_string()],
         &["ES256".to_string()],
     ));
-    let err = result.unwrap_err().to_string();
+    // `{:#}` renders the whole context chain: the top level is the typed
+    // `JwksFault` marker's summary, the cause carries the specific reason.
+    let err = format!("{:#}", result.unwrap_err());
 
     assert!(
         err.contains("must use https"),

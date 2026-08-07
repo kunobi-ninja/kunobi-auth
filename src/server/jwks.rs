@@ -13,6 +13,20 @@ use tracing::debug;
 
 const JWKS_CACHE_TTL: Duration = Duration::from_secs(300);
 
+/// Typed marker attached (via [`anyhow::Context`]) to errors that represent a
+/// JWKS fetch/transport/structural fault — a *server-side* problem, as opposed
+/// to a token-level rejection. `configured::is_jwks_transport_fault` detects it
+/// with a downcast rather than by inspecting message text, which can embed
+/// attacker-controlled values (e.g. the JWT header `kid`).
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct JwksFault;
+
+impl std::fmt::Display for JwksFault {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("JWKS provider fault")
+    }
+}
+
 /// Minimum interval between forced JWKS refetches triggered by an unknown
 /// `kid`. Prevents an attacker who sends garbage `kid` values from turning
 /// the auth path into an amplification vector against the IdP.
@@ -272,7 +286,13 @@ impl JwksManager {
                 anyhow::bail!("signing algorithm not allowed");
             }
 
-            let keys = self.get_keys(jwks_url, kid).await?;
+            // Every `get_keys` failure is a server-side fault (URL validation,
+            // fetch, oversized/unparseable body) — tag the chain so
+            // `configured` classifies it as 500-class without string matching.
+            let keys = self
+                .get_keys(jwks_url, kid)
+                .await
+                .map_err(|e| e.context(JwksFault))?;
             // Map an unknown-`kid`/no-usable-key lookup to a stable, redaction-safe
             // reason. `find_matching_key`'s detailed message (which echoes the kid)
             // is preserved in the error source chain for server-side logs.
