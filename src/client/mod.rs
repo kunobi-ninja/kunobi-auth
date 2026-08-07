@@ -1,5 +1,6 @@
 mod config;
 mod discovery;
+mod lock;
 pub mod oidc;
 pub mod session;
 pub mod ssh;
@@ -8,7 +9,7 @@ pub mod tofu;
 mod token;
 
 pub use config::ServiceConfig;
-pub use discovery::discover;
+pub use discovery::{discover, discover_unpinned, discover_with_store};
 pub use ssh::{SshAgentAuth, SshKeyInfo};
 #[cfg(feature = "keyring")]
 pub use store::KeyringStore;
@@ -264,7 +265,22 @@ impl AuthClient {
     }
 
     async fn oidc_token(&self, config: &ServiceConfig) -> Result<String> {
-        // Try cached token
+        // Fast path: a valid cached token needs no cross-process coordination.
+        if let Some(stored) = self.store.load(&config.issuer)?
+            && !stored.is_expired()
+        {
+            return Ok(stored.id_token);
+        }
+
+        // Serialise the refresh/login across processes: rotating refresh
+        // tokens are single-use at many IdPs, so two concurrent CLIs racing
+        // the same token trip reuse detection and revoke the grant family.
+        // Waiting here usually means another process is refreshing (or in a
+        // browser login) for this issuer — when it finishes, the re-check
+        // below picks up its fresh token.
+        let _refresh_lock = lock::RefreshLock::acquire(&config.issuer).await?;
+
+        // Re-check under the lock.
         if let Some(stored) = self.store.load(&config.issuer)? {
             if !stored.is_expired() {
                 return Ok(stored.id_token);

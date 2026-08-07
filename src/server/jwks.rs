@@ -103,6 +103,11 @@ struct CachedValidation {
 pub struct JwksManager {
     http: reqwest::Client,
     cache: RwLock<HashMap<String, CachedJwks>>,
+    /// Per-URL single-flight locks so concurrent cache misses for the same
+    /// JWKS URL queue behind one fetch instead of stampeding the IdP.
+    /// Entries are never removed; the map is bounded by the number of
+    /// distinct operator-configured JWKS URLs.
+    fetch_locks: tokio::sync::Mutex<HashMap<String, std::sync::Arc<tokio::sync::Mutex<()>>>>,
     /// Per-token validation cache. `None` = disabled (default).
     validation_cache: Option<ValidationCache>,
     /// Clock-skew tolerance applied to `exp`/`nbf`, in line with
@@ -131,6 +136,7 @@ impl JwksManager {
         Self {
             http,
             cache: RwLock::new(HashMap::new()),
+            fetch_locks: tokio::sync::Mutex::new(HashMap::new()),
             validation_cache: None,
             leeway: DEFAULT_JWT_LEEWAY,
         }
@@ -293,11 +299,6 @@ impl JwksManager {
                 .get_keys(jwks_url, kid)
                 .await
                 .map_err(|e| e.context(JwksFault))?;
-            // Map an unknown-`kid`/no-usable-key lookup to a stable, redaction-safe
-            // reason. `find_matching_key`'s detailed message (which echoes the kid)
-            // is preserved in the error source chain for server-side logs.
-            let key = find_matching_key(&keys, kid)
-                .map_err(|e| e.context("unknown signing key (kid)"))?;
 
             let mut validation = Validation::new(header.alg);
             // jsonwebtoken only enforces a claim when present unless it is listed
@@ -321,8 +322,14 @@ impl JwksManager {
             // the operator configured (default still 60s — see `with_leeway`).
             validation.leeway = self.leeway.as_secs();
 
-            let decoding_key = build_decoding_key(key)?;
-            let token_data =
+            let token_data = if kid.is_some() {
+                // Map an unknown-`kid` lookup to a stable, redaction-safe
+                // reason. `find_matching_key`'s detailed message (which echoes
+                // the kid) is preserved in the error source chain for
+                // server-side logs.
+                let key = find_matching_key(&keys, kid)
+                    .map_err(|e| e.context("unknown signing key (kid)"))?;
+                let decoding_key = build_decoding_key(key)?;
                 decode::<HashMap<String, serde_json::Value>>(token, &decoding_key, &validation)
                     .map_err(|e| {
                         // Map jsonwebtoken's ErrorKind to a specific, redaction-safe
@@ -330,7 +337,13 @@ impl JwksManager {
                         // source for server-side logs (it carries no token bytes).
                         let reason = jwt_error_message(&e);
                         anyhow::Error::new(e).context(reason)
-                    })?;
+                    })?
+            } else {
+                // `kid` is optional (RFC 7515 §4.1.4): a kid-less token from
+                // an IdP with several signing keys must be tried against each
+                // candidate, not just the first.
+                decode_with_any_key(token, &keys, &validation)?
+            };
 
             // Populate the validation cache, capping TTL by token.exp.
             if let Some(cache) = &self.validation_cache {
@@ -352,18 +365,22 @@ impl JwksManager {
     async fn get_keys(&self, jwks_url: &str, wanted_kid: Option<&str>) -> Result<Vec<Jwk>> {
         validate_remote_auth_url(jwks_url, "JWKS")?;
 
-        // Check cache.
-        {
-            let cache = self.cache.read().await;
-            if let Some(cached) = cache.get(jwks_url) {
-                let kid_present = match wanted_kid {
-                    Some(kid) => cached.keys.iter().any(|k| k.kid.as_deref() == Some(kid)),
-                    None => true,
-                };
-                if jwks_cache_should_be_used(cached.fetched_at.elapsed(), kid_present) {
-                    return Ok(cached.keys.clone());
-                }
-            }
+        if let Some(keys) = self.cached_keys(jwks_url, wanted_kid).await {
+            return Ok(keys);
+        }
+
+        // Single-flight: queue concurrent misses for the same URL behind one
+        // fetch instead of stampeding the IdP (cold start, TTL expiry, or a
+        // fetch pile-up during an IdP outage).
+        let url_lock = {
+            let mut locks = self.fetch_locks.lock().await;
+            locks.entry(jwks_url.to_string()).or_default().clone()
+        };
+        let _fetch_guard = url_lock.lock().await;
+
+        // Re-check: another task may have completed the fetch while we waited.
+        if let Some(keys) = self.cached_keys(jwks_url, wanted_kid).await {
+            return Ok(keys);
         }
 
         // Miss / stale / forced rotation refetch.
@@ -403,6 +420,19 @@ impl JwksManager {
 
         Ok(keys)
     }
+
+    /// Return cached keys for `jwks_url` when the cache entry is fresh enough
+    /// per [`jwks_cache_should_be_used`], else `None` (fetch required).
+    async fn cached_keys(&self, jwks_url: &str, wanted_kid: Option<&str>) -> Option<Vec<Jwk>> {
+        let cache = self.cache.read().await;
+        let cached = cache.get(jwks_url)?;
+        let kid_present = match wanted_kid {
+            Some(kid) => cached.keys.iter().any(|k| k.kid.as_deref() == Some(kid)),
+            None => true,
+        };
+        jwks_cache_should_be_used(cached.fetched_at.elapsed(), kid_present)
+            .then(|| cached.keys.clone())
+    }
 }
 
 impl Default for JwksManager {
@@ -430,7 +460,13 @@ pub fn verify_azp(
     }
     match claims.get("azp").and_then(|v| v.as_str()) {
         Some(azp) if authorized_parties.iter().any(|p| p == azp) => Ok(()),
-        Some(azp) => anyhow::bail!("unauthorized azp: {azp}"),
+        // Redaction: the top-level message reaches the 401 body /
+        // `WWW-Authenticate`; keep the claim value in the source chain for
+        // server-side logs only.
+        Some(azp) => {
+            Err(anyhow::anyhow!("azp {azp:?} is not in authorizedParties")
+                .context("unauthorized azp"))
+        }
         None => anyhow::bail!("missing azp claim (authorizedParties is configured)"),
     }
 }
@@ -498,9 +534,12 @@ async fn insert_validated(
     // Cap cache lifetime at the token's own exp claim. Tokens already
     // checked validate_exp, so exp is in the future; we just don't want
     // to keep them past it.
+    // `as_i64` alone would miss float `exp` values (e.g. `1770000000.5`),
+    // which jsonwebtoken accepts as valid — falling back to the full TTL and
+    // keeping the entry past expiry. Floor floats so the cap errs earlier.
     let token_exp_in = claims
         .get("exp")
-        .and_then(|v| v.as_i64())
+        .and_then(|v| v.as_i64().or_else(|| v.as_f64().map(|f| f.floor() as i64)))
         .map(|exp| {
             let now_unix = chrono::Utc::now().timestamp();
             Duration::from_secs(exp.saturating_sub(now_unix).max(0) as u64)
@@ -552,6 +591,60 @@ async fn insert_validated(
             valid_until,
         },
     );
+}
+
+/// Decode a kid-less token by trying every usable signing key in the set.
+///
+/// A claims-level failure (expired, wrong audience/issuer, missing required
+/// claim) proves the signature verified under that key, so it is surfaced
+/// immediately as the real reason. Signature/key failures move on to the next
+/// candidate; if no key verifies, the last such error is returned with the
+/// same redaction-safe mapping as the single-key path.
+fn decode_with_any_key(
+    token: &str,
+    keys: &[Jwk],
+    validation: &Validation,
+) -> Result<jsonwebtoken::TokenData<HashMap<String, serde_json::Value>>> {
+    let mut last_err: Option<anyhow::Error> = None;
+    for key in keys.iter().filter(|k| k.is_signing_key()) {
+        let decoding_key = match build_decoding_key(key) {
+            Ok(k) => k,
+            Err(e) => {
+                // Key unusable for this algorithm (wrong kty, malformed
+                // parameters) — skip it, remember why in case nothing works.
+                last_err = Some(e);
+                continue;
+            }
+        };
+        match decode::<HashMap<String, serde_json::Value>>(token, &decoding_key, validation) {
+            Ok(data) => return Ok(data),
+            Err(e) if is_claims_error(&e) => {
+                let reason = jwt_error_message(&e);
+                return Err(anyhow::Error::new(e).context(reason));
+            }
+            Err(e) => {
+                let reason = jwt_error_message(&e);
+                last_err = Some(anyhow::Error::new(e).context(reason));
+            }
+        }
+    }
+    Err(last_err.unwrap_or_else(|| {
+        anyhow::anyhow!("JWKS has no usable signing key").context("unknown signing key (kid)")
+    }))
+}
+
+/// Whether a `jsonwebtoken` error concerns the *claims* (checked only after
+/// the signature verified) rather than the signature/key itself.
+fn is_claims_error(err: &JwtError) -> bool {
+    matches!(
+        err.kind(),
+        JwtErrorKind::ExpiredSignature
+            | JwtErrorKind::ImmatureSignature
+            | JwtErrorKind::InvalidIssuer
+            | JwtErrorKind::InvalidAudience
+            | JwtErrorKind::InvalidSubject
+            | JwtErrorKind::MissingRequiredClaim(_)
+    )
 }
 
 fn find_matching_key<'a>(keys: &'a [Jwk], kid: Option<&str>) -> Result<&'a Jwk> {
@@ -1285,6 +1378,26 @@ mod tests {
     // tries `>` -> `<`, `>=`, `==`; each of these tests fails for at least
     // one mutant.
 
+    #[tokio::test]
+    async fn float_exp_still_caps_validation_cache_lifetime() {
+        // jsonwebtoken accepts float `exp` claims; the cache cap must honour
+        // them instead of silently falling back to the full TTL.
+        let cache = ValidationCache {
+            entries: RwLock::new(HashMap::new()),
+            ttl: Duration::from_secs(300),
+        };
+        let mut claims = HashMap::new();
+        let exp = chrono::Utc::now().timestamp() as f64 + 5.5;
+        claims.insert("exp".to_string(), serde_json::json!(exp));
+
+        insert_validated(&cache, [7u8; 32], &claims).await;
+
+        let entries = cache.entries.read().await;
+        let entry = entries.get(&[7u8; 32]).expect("entry inserted");
+        // Capped by (floored) exp — well under the 300s TTL.
+        assert!(entry.valid_until <= Instant::now() + Duration::from_secs(6));
+    }
+
     #[test]
     fn test_cache_entry_is_fresh_future_is_true() {
         // valid_until in the future -> fresh. Kills `>` -> `<` and `>` -> `==`.
@@ -1391,6 +1504,16 @@ mod tests {
     fn verify_azp_rejects_unlisted_party() {
         let allowed = vec!["cli".to_string()];
         assert!(verify_azp(&claims_with_azp(Some("attacker")), &allowed).is_err());
+    }
+
+    #[test]
+    fn verify_azp_rejection_redacts_claim_value_from_top_level() {
+        // The top-level message reaches 401 bodies / WWW-Authenticate; the
+        // claim value must live only in the source chain (server-side logs).
+        let allowed = vec!["cli".to_string()];
+        let err = verify_azp(&claims_with_azp(Some("secret-party")), &allowed).unwrap_err();
+        assert_eq!(err.to_string(), "unauthorized azp");
+        assert!(format!("{err:#}").contains("secret-party"));
     }
 
     #[test]

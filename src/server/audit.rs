@@ -32,12 +32,29 @@ impl AuditLog for StdoutAuditLog {
             .map(|i| i.identity)
             .unwrap_or_else(|| "anonymous".to_string());
         tracing::info!(
-            identity = %identity,
-            action = %entry.action,
-            resource = %entry.resource,
+            identity = %sanitize(&identity),
+            action = %sanitize(&entry.action),
+            resource = %sanitize(&entry.resource),
             outcome = ?entry.outcome,
             "audit"
         );
+    }
+}
+
+/// Replace control characters (newlines, ANSI escape introducers, …) with
+/// U+FFFD. The identity typically derives from an IdP claim an attacker can
+/// choose, so raw control characters would let them forge audit lines or
+/// corrupt terminal output under a plain-text subscriber.
+fn sanitize(field: &str) -> std::borrow::Cow<'_, str> {
+    if field.chars().any(char::is_control) {
+        std::borrow::Cow::Owned(
+            field
+                .chars()
+                .map(|c| if c.is_control() { '\u{FFFD}' } else { c })
+                .collect(),
+        )
+    } else {
+        std::borrow::Cow::Borrowed(field)
     }
 }
 
@@ -104,6 +121,21 @@ mod tests {
 
         // Log without identity (anonymous)
         logger.log(sample_entry(None));
+    }
+
+    #[test]
+    fn sanitize_replaces_control_characters() {
+        let forged = "alice\n2026-08-07 INFO audit identity=admin outcome=Allowed";
+        let clean = sanitize(forged);
+        assert!(!clean.contains('\n'), "newline must not survive: {clean:?}");
+        assert!(clean.contains('\u{FFFD}'));
+        // ANSI escape introducer is a control character too.
+        assert_eq!(sanitize("a\x1b[31mred"), "a\u{FFFD}[31mred");
+        // Clean strings pass through unchanged (borrowed).
+        assert!(matches!(
+            sanitize("user@example.com"),
+            std::borrow::Cow::Borrowed(_)
+        ));
     }
 
     #[test]

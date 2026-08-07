@@ -18,7 +18,7 @@ No Kubernetes dependency. Tested end-to-end against [Dex](https://dexidp.io/) v2
 
 | Feature  | Default | Includes                                                                                                                                                                                                                          |
 | -------- | ------- | --------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| `client`     | yes     | OIDC browser login (PKCE), device-authorization grant, refresh-token flow, token introspection + revocation, static-token, SSH-agent signing, TOFU audience pinning, per-shell session state                                      |
+| `client`     | yes     | OIDC browser login (PKCE), device-authorization grant, refresh-token flow, token introspection + revocation, static-token, SSH-agent signing, TOFU issuer+audience pinning (enforced at discovery), per-shell session state                                      |
 | `server`     | yes     | JWT/JWKS validation (RS/PS/ES/EdDSA + auto-rotating cache), opt-in per-token validation cache, DPoP proof verifier (RFC 9449), SSH-signature verification with atomic-replay-protected nonce tracker, `AuthLayer` + axum extractors |
 | `mcp-server` | no      | MCP resource-server helpers on top of `server`: OAuth Protected Resource Metadata, MCP `WWW-Authenticate` challenges, and required bearer auth middleware                                           |
 | `rust_crypto` | yes    | jsonwebtoken's pure-Rust crypto backend                                                                                                                                                              |
@@ -423,7 +423,7 @@ Clients fetch auth configuration from `GET {endpoint}/v1/status`:
 
 ## Token storage
 
-OIDC tokens are persisted to `~/.config/kunobi/tokens/`, one file per issuer (filename is a hash of the issuer URL). The directory is `0o700`; each token file is `0o600`. Writes are atomic — a temp file in the same directory is `fsync`'d, then renamed over the destination, so a partial write is never observable. The TOFU store at `~/.config/kunobi/known_services.json` follows the same scheme.
+OIDC tokens are persisted to `~/.config/kunobi/tokens/`, one file per issuer (filename is a hash of the issuer URL). The directory is `0o700`; each token file is `0o600`. Writes are atomic — a temp file in the same directory is `fsync`'d, then renamed over the destination, so a partial write is never observable. The TOFU store at `~/.config/kunobi/known_services.json` follows the same scheme. Refreshes are additionally serialised across processes via an advisory lock under `~/.config/kunobi/locks/`, so concurrent CLIs cannot race a rotating refresh token into IdP reuse-detection revocation.
 
 Refresh-token flow: when a cached ID token is past its expiry (with a 60s buffer), `AuthClient::token()` exchanges the refresh token for a fresh ID token without prompting. Only if refresh fails (or no refresh token was issued) does it fall back to interactive login. Request `offline_access` scope from your IdP to ensure refresh tokens are issued.
 
