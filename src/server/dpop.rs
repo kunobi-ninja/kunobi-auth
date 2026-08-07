@@ -273,6 +273,11 @@ fn ec_curve_str(curve: &jsonwebtoken::jwk::EllipticCurve) -> Result<&'static str
         EllipticCurve::Ed25519 => Err(AuthError::Unauthorized(
             "Ed25519 in EC kty is not standard; not supported for jkt".into(),
         )),
+        // `EllipticCurve` is #[non_exhaustive] since jsonwebtoken 11; reject
+        // curves this verifier does not know how to canonicalize.
+        _ => Err(AuthError::Unauthorized(
+            "unsupported EC curve for jkt".into(),
+        )),
     }
 }
 
