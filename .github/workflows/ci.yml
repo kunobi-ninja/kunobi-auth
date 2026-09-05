@@ -22,7 +22,7 @@ env:
 jobs:
   checks:
     name: Rust Checks
-    runs-on: kunobi-runners
+    runs-on: kunobi-runners-small
     container:
       image: rust:1.94-bookworm
     timeout-minutes: 15
@@ -89,7 +89,7 @@ jobs:
 
   deny:
     name: cargo-deny
-    runs-on: kunobi-runners
+    runs-on: kunobi-runners-small
     container:
       image: rust:1.94-bookworm
     timeout-minutes: 10
@@ -118,7 +118,7 @@ jobs:
 
   e2e:
     name: E2E (Dex)
-    runs-on: kunobi-runners
+    runs-on: kunobi-runners-small
     timeout-minutes: 15
     needs: checks
     steps:
