@@ -2,7 +2,7 @@
 //!
 //! [`AuthFailReason`] is a bounded, redaction-safe vocabulary for auth
 //! failures — built for metrics labels, structured logs, and observer
-//! callbacks (see [`AuthObserver`](crate::server::AuthObserver)). It never
+//! callbacks (see `server::AuthObserver`). It never
 //! carries token bytes, claim values, or key material; its
 //! [`Display`](std::fmt::Display) text is the same safe phrasing surfaced in
 //! `401` bodies, and [`AuthFailReason::label`] gives a stable low-cardinality

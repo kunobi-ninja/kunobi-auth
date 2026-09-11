@@ -21,6 +21,7 @@ No Kubernetes dependency. Tested end-to-end against [Dex](https://dexidp.io/) v2
 | `client`     | yes     | OIDC browser login (PKCE), device-authorization grant, refresh-token flow, token introspection + revocation, static-token, SSH-agent signing, TOFU issuer+audience pinning (enforced at discovery), per-shell session state                                      |
 | `server`     | yes     | JWT/JWKS validation (RS/PS/ES/EdDSA + auto-rotating cache), opt-in per-token validation cache, DPoP proof verifier (RFC 9449), SSH-signature verification with atomic-replay-protected nonce tracker, `AuthLayer` + axum extractors |
 | `mcp-server` | no      | MCP resource-server helpers on top of `server`: OAuth Protected Resource Metadata, MCP `WWW-Authenticate` challenges, and required bearer auth middleware                                           |
+| `oauth`      | no      | Provider-agnostic OAuth 2.0 access-token grants: RFC 9728/8414 discovery, PKCE, loopback callback, dynamic registration, keyed token storage, and refresh orchestration |
 | `rust_crypto` | yes    | jsonwebtoken's pure-Rust crypto backend                                                                                                                                                              |
 | `aws_lc_rs`  | no      | jsonwebtoken's aws-lc-rs crypto backend — pick this instead of `rust_crypto` if your app already links aws-lc-rs (e.g. via rustls), to avoid enabling both backends                                  |
 
@@ -41,6 +42,8 @@ graph, and jsonwebtoken 10 panics at the first JWT operation if both backends en
 up enabled and no provider was installed; `kunobi-auth` installs the backend you
 select here on first use (call `kunobi_auth::ensure_crypto_provider()` or
 jsonwebtoken's `CryptoProvider::install_default()` yourself to override).
+
+The `oauth` feature does not use JWT validation or require a JWT crypto backend.
 
 > The crate is not (yet) on crates.io. Pin via git tag — see the [latest release](https://github.com/kunobi-ninja/kunobi-auth/releases) for stable refs.
 
@@ -94,6 +97,28 @@ let token = client.device_login(
 let client = AuthClient::with_static_token("my-api-token".into())?;
 let token = client.token().await?;
 ```
+
+### External OAuth access-token grants
+
+Enable `oauth` for a provider API or remote MCP connection that needs OAuth
+**access tokens**:
+
+```toml
+kunobi-auth = { git = "https://github.com/kunobi-ninja/kunobi-auth", default-features = false, features = ["oauth"] }
+```
+
+`kunobi_auth::oauth` is separate from `client::AuthClient`. `AuthClient` manages
+Kunobi OIDC identity sessions and returns ID tokens. The `oauth` module obtains,
+stores, and refreshes bearer access tokens for an external provider.
+
+The module supplies protocol components: provider resolution, PKCE and callback
+validation, token exchange/refresh/revocation, a hardened HTTP seam, keyed token
+stores, and the fenced grant/refresh registry. The host owns browser launch and
+UI, its durable connection metadata, keychain service identity, and how a valid
+access token is injected into its transport. Use `oauth::OAuthHttp` and
+`oauth::TokenStore` seams for host-specific transport and storage; use
+`oauth::GrantRegistry` and `oauth::RefreshBroker` when the host manages pending
+flows or refreshes across connection lifecycle events.
 
 ### Logout with revocation, introspection
 
@@ -549,6 +574,14 @@ Unit tests:
 
 ```sh
 cargo test --all-features
+```
+
+OAuth-only checks (the full JWT/DPoP suite above also needs a JWT crypto backend):
+
+```sh
+cargo test --no-default-features --features oauth --lib oauth::
+cargo test --no-default-features --features oauth --test oauth_compat_keychain
+cargo doc --lib --no-deps --no-default-features --features oauth
 ```
 
 End-to-end tests against a real OIDC provider (Dex) live in `tests/e2e_dex.rs` and are gated with `#[ignore]`. Locally:

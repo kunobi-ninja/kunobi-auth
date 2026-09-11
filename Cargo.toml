@@ -34,6 +34,9 @@ browser-login = ["client", "dep:open", "dep:axum"]
 # DPoP, SSH-signature verification, and audit log are available WITHOUT this.
 server = ["dep:axum", "dep:tower", "dep:http"]
 mcp-server = ["server"]
+# Provider-agnostic access-token grants for external APIs and MCP servers.
+# Hosts own browser/UI and keychain integration; no OIDC session or Axum deps.
+oauth = ["dep:async-trait", "dep:getrandom", "dep:url", "dep:zeroize", "tokio/io-util"]
 # OS keychain-backed token storage (macOS Keychain / Windows Credential
 # Manager). Linux Secret Service can be added later via the keyring crate's
 # `sync-secret-service` feature.
@@ -45,6 +48,12 @@ axum = { version = "0.8", optional = true }
 reqwest = { version = "0.13", features = ["json", "form", "rustls"], default-features = false }
 tower = { version = "0.5", optional = true }
 http = { version = "1", optional = true }
+
+# OAuth access-token grants (independent of the OIDC identity client).
+async-trait = { version = "0.1", optional = true }
+getrandom = { version = "0.4", optional = true }
+url = { version = "2", optional = true }
+zeroize = { version = "1", optional = true }
 
 # OIDC (client)
 openidconnect = { version = "4.0", optional = true }

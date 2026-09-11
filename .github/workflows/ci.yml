@@ -64,6 +64,18 @@ jobs:
       - name: Tests
         run: cargo test --all-features
 
+      - name: Test (OAuth library only)
+        run: cargo test --no-default-features --features oauth --lib "oauth::"
+
+      - name: Test (OAuth keychain compatibility)
+        run: cargo test --no-default-features --features oauth --test oauth_compat_keychain
+
+      - name: Build docs (OAuth only)
+        run: cargo doc --lib --no-deps --no-default-features --features oauth
+
+      - name: Verify standalone OAuth package
+        run: cargo package --locked --no-default-features --features oauth
+
       - name: Coverage
         run: cargo tarpaulin --engine llvm --all-features --workspace --out Json --output-dir coverage --fail-under 50
 
