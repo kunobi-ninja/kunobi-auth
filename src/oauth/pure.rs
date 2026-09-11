@@ -126,7 +126,10 @@ pub fn parse_callback(url: &str, expected_state: &str) -> Result<Callback, Callb
     // some other flow — or to nobody — end this one, with a message of the
     // sender's choosing. The CSRF guard is not only for the success path.
     if let Some(state) = state.as_deref() {
-        if state != expected_state {
+        // Constant-time, matching the callback listener. A caller on this pure
+        // layer used to get a plain `!=` while the I/O layer compared properly,
+        // so the guard depended on which entry point a host chose.
+        if !crate::oauth::pkce::state_matches(expected_state, state) {
             return Err(CallbackError::StateMismatch {
                 expected: expected_state.to_string(),
                 received: state.to_string(),
@@ -248,9 +251,10 @@ pub fn parse_token_response(body: &str) -> Result<Tokens, TokenError> {
 
 /// Percent-encode everything outside the unreserved set of RFC 3986.
 ///
-/// Hand-rolled rather than pulled from a URL crate: the encoding rules are
-/// eight lines and fully covered by tests, against a dependency this pure crate
-/// would otherwise not need.
+/// Encode an OAuth form parameter without coupling OAuth to an OpenAPI crate.
+///
+/// `kunobi-openapi` in `Zondax/kunobi-frontend` keeps the same small encoder in
+/// `src/request.rs`. Keep both implementations aligned when encoding rules change.
 fn percent_encode(value: &str) -> String {
     let mut out = String::with_capacity(value.len());
     for byte in value.bytes() {
