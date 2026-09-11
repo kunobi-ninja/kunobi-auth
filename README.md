@@ -27,13 +27,13 @@ No Kubernetes dependency. Tested end-to-end against [Dex](https://dexidp.io/) v2
 
 ```toml
 # Server only (no browser deps)
-kunobi-auth = { git = "https://github.com/kunobi-ninja/kunobi-auth", tag = "v0.5.0", default-features = false, features = ["server"] }
+kunobi-auth = { version = "0.11", default-features = false, features = ["server"] }
 
 # MCP server only
-kunobi-auth = { git = "https://github.com/kunobi-ninja/kunobi-auth", tag = "v0.5.0", default-features = false, features = ["mcp-server"] }
+kunobi-auth = { version = "0.11", default-features = false, features = ["mcp-server"] }
 
 # Client only
-kunobi-auth = { git = "https://github.com/kunobi-ninja/kunobi-auth", tag = "v0.5.0", default-features = false, features = ["client"] }
+kunobi-auth = { version = "0.11", default-features = false, features = ["client"] }
 ```
 
 **Crypto backend:** when using `default-features = false`, also enable exactly one
@@ -45,7 +45,7 @@ jsonwebtoken's `CryptoProvider::install_default()` yourself to override).
 
 The `oauth` feature does not use JWT validation or require a JWT crypto backend.
 
-> The crate is not (yet) on crates.io. Pin via git tag — see the [latest release](https://github.com/kunobi-ninja/kunobi-auth/releases) for stable refs.
+Install from [crates.io](https://crates.io/crates/kunobi-auth). See the [latest release](https://github.com/kunobi-ninja/kunobi-auth/releases) for release notes.
 
 ## Client usage
 
@@ -104,7 +104,7 @@ Enable `oauth` for a provider API or remote MCP connection that needs OAuth
 **access tokens**:
 
 ```toml
-kunobi-auth = { git = "https://github.com/kunobi-ninja/kunobi-auth", default-features = false, features = ["oauth"] }
+kunobi-auth = { version = "0.11", default-features = false, features = ["oauth"] }
 ```
 
 `kunobi_auth::oauth` is separate from `client::AuthClient`. `AuthClient` manages
