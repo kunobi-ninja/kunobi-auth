@@ -449,7 +449,7 @@ impl Default for JwksManager {
 ///
 /// Apply this after [`JwksManager::validate_jwt`] on the returned claims to
 /// honor an OIDC provider's `authorizedParties` configuration when validating
-/// against a dynamically-selected provider (the static [`super::ConfiguredAuth`]
+/// against a dynamically-selected provider (the static `super::ConfiguredAuth`
 /// path applies it for you).
 pub fn verify_azp(
     claims: &HashMap<String, serde_json::Value>,

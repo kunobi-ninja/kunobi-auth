@@ -25,11 +25,10 @@ pub struct AuthMethod {
 /// serialization-friendly representation of an OIDC method (e.g. as published
 /// in service discovery or a CRD) for consumers to map onto the actual
 /// validator. The crate's own validation path is
-/// [`JwtAuthConfig`](crate::server::JwtAuthConfig) /
-/// [`AuthBuilder`](crate::server::AuthBuilder); constructing an `OidcAuth` does
+/// `JwtAuthConfig` / `AuthBuilder`; constructing an `OidcAuth` does
 /// **not** by itself cause any claim to be checked. In particular `audience`
 /// and `authorized_parties` below are inert unless your code wires them into a
-/// validator. Map them onto [`JwtAuthConfig`](crate::server::JwtAuthConfig)
+/// validator. Map them onto `JwtAuthConfig`
 /// (`audience` / `JwtAuthConfig::authorized_parties`), which enforces both —
 /// note it *requires* a non-empty audience.
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -46,7 +45,7 @@ pub struct OidcAuth {
     #[serde(default)]
     pub audience: Vec<String>,
     /// Expected authorized parties (`azp` claim). Declarative only — map onto
-    /// [`JwtAuthConfig::authorized_parties`](crate::server::JwtAuthConfig) to
+    /// `JwtAuthConfig::authorized_parties` to
     /// have it enforced; setting it here alone checks nothing.
     #[serde(default)]
     pub authorized_parties: Vec<String>,

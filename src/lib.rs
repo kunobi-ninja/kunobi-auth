@@ -36,10 +36,14 @@
 //! # Ok(()) }
 //! ```
 //!
-//! See [`server::AuthnProvider`] / [`server::RequiredAuth`] for the recommended
-//! axum integration, and [`server::ssh`] for SSH-signature verification.
+//! See `server::AuthnProvider` / `server::RequiredAuth` for the recommended
+//! axum integration, and `server::ssh` for SSH-signature verification.
 
 pub mod common;
+
+/// OAuth access-token grants keyed by connection, with host-owned UI and storage.
+#[cfg(feature = "oauth")]
+pub mod oauth;
 
 #[cfg(feature = "client")]
 pub mod client;

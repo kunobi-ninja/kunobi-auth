@@ -15,7 +15,11 @@
 /// assert!(!secret_eq("s3cret", "s3cret-extra"));
 /// ```
 pub fn secret_eq(a: &str, b: &str) -> bool {
-    let (a, b) = (a.as_bytes(), b.as_bytes());
+    secret_eq_bytes(a.as_bytes(), b.as_bytes())
+}
+
+/// Shared byte primitive for string secrets and OAuth's byte-slice API.
+pub(crate) fn secret_eq_bytes(a: &[u8], b: &[u8]) -> bool {
     if a.len() != b.len() {
         return false;
     }
@@ -25,6 +29,13 @@ pub fn secret_eq(a: &str, b: &str) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn byte_secrets_preserve_non_utf8_content() {
+        assert!(secret_eq_bytes(&[0xff, 0, 0x80], &[0xff, 0, 0x80]));
+        assert!(!secret_eq_bytes(&[0xff, 0, 0x80], &[0xff, 0, 0x81]));
+        assert!(!secret_eq_bytes(&[0xff], &[0xff, 0]));
+    }
 
     #[test]
     fn equal_secrets_match() {
