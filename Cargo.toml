@@ -9,6 +9,9 @@ repository = "https://github.com/kunobi-ninja/kunobi-auth"
 readme = "README.md"
 keywords = ["oidc", "authentication", "jwt", "kubernetes", "operator"]
 categories = ["authentication", "web-programming"]
+# Publish only what builds the library. Tests, fuzz targets, CI and tool output
+# (such as cargo-mutants runs) stay in the repository.
+include = ["/src/**/*.rs", "/README.md", "/LICENSE"]
 
 [features]
 default = ["client", "browser-login", "server", "rust_crypto"]
