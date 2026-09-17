@@ -79,7 +79,7 @@ jsonwebtoken = { version = "11", default-features = false, features = ["use_pem"
 open = { version = "5", optional = true }
 
 # Dirs (client)
-dirs = { version = "6", optional = true }
+dirs = { version = "7", optional = true }
 
 # Atomic file writes for client TOFU + token stores
 tempfile = { version = "3", optional = true }
@@ -111,7 +111,7 @@ anyhow = "1"
 
 # Logging
 tracing = "0.1"
-ssh-agent-client-rs = "1.1.2"
+ssh-agent-client-rs = "1.1.3"
 
 [dev-dependencies]
 http-body-util = "0.1"
@@ -119,4 +119,4 @@ tokio = { version = "1", features = ["test-util"] }
 rand_core = { version = "0.6", features = ["getrandom"] }
 tempfile = "3"
 # Property-based testing for parsers + boundaries.
-proptest = "1.5"
+proptest = "1.11"
