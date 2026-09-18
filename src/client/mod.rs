@@ -116,7 +116,7 @@ impl AuthClient {
     }
 
     /// Perform interactive login (always opens browser).
-    #[cfg(feature = "browser-login")]
+    #[cfg(feature = "browser-login-core")]
     pub async fn login(&self) -> Result<StoredToken> {
         match &self.provider {
             TokenProvider::Static(_) => anyhow::bail!("Cannot login with static token"),
@@ -313,12 +313,12 @@ impl AuthClient {
         }
 
         // No valid cached token / refresh failed -- interactive login.
-        #[cfg(feature = "browser-login")]
+        #[cfg(feature = "browser-login-core")]
         {
             let token = self.login().await?;
             Ok(token.id_token)
         }
-        #[cfg(not(feature = "browser-login"))]
+        #[cfg(not(feature = "browser-login-core"))]
         {
             anyhow::bail!(
                 "no valid cached token and refresh unavailable; enable the \

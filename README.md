@@ -24,7 +24,9 @@ No Kubernetes dependency. Tested end-to-end against [Dex](https://dexidp.io/) v2
 | `oauth`      | no      | Provider-agnostic OAuth 2.0 access-token grants: RFC 9728/8414 discovery, PKCE, loopback callback, dynamic registration, keyed token storage, and refresh orchestration |
 | `rust_crypto` | yes    | jsonwebtoken's pure-Rust crypto backend                                                                                                                                                              |
 | `aws_lc_rs`  | no      | jsonwebtoken's aws-lc-rs crypto backend — pick this instead of `rust_crypto` if your app already links aws-lc-rs (e.g. via rustls), to avoid enabling both backends                                  |
-| `aws-lc-tls` | yes     | TLS provider for outbound HTTP (discovery, JWKS, token endpoint): reqwest's rustls with aws-lc-rs. Disable default features to bring your own rustls `CryptoProvider` (e.g. ring) and install it before the first request |
+| `aws-lc-tls` | yes     | TLS for outbound HTTP (discovery, JWKS, token endpoint): reqwest's rustls with aws-lc-rs. Implied by `client`, `browser-login`, `server` and `oauth` |
+| `client-core` | no     | `client` without a TLS provider, for builds that keep aws-lc-rs out (e.g. ring-only). Install a rustls `CryptoProvider` before the first request |
+| `browser-login-core` | no | `browser-login` without a TLS provider; see `client-core` |
 
 ```toml
 # Server only (no browser deps)

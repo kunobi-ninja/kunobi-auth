@@ -39,7 +39,7 @@
 //! ## Example
 //!
 //! ```rust,no_run
-//! # #[cfg(feature = "client")] {
+//! # #[cfg(feature = "client-core")] {
 //! use kunobi_auth::client::session;
 //! use serde::{Deserialize, Serialize};
 //!
