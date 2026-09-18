@@ -35,7 +35,7 @@ client = ["client-core", "aws-lc-tls"]
 # `client` without choosing a TLS provider, for consumers that keep aws-lc-rs
 # out of their build (e.g. ring-only). HTTPS still works once the consumer
 # installs a rustls CryptoProvider, which must happen before any HTTP client
-# is built (see `require_tls_provider`).
+# is built.
 client-core = ["dep:dirs", "dep:tempfile", "dep:sysinfo", "dep:openidconnect", "dep:oauth2"]
 # Interactive browser-based OIDC login (PKCE). Adds a localhost callback
 # server (axum) + a browser opener. Separable so client consumers that
@@ -60,9 +60,6 @@ keyring = ["client", "dep:keyring"]
 # HTTP / Web
 axum = { version = "0.8", optional = true }
 reqwest = { version = "0.13", features = ["json", "form", "rustls-no-provider"], default-features = false }
-# Only to check that a TLS provider is installed when `aws-lc-tls` is off
-# (see `require_tls_provider`); reqwest already depends on it.
-rustls = { version = "0.23", default-features = false, features = ["std"] }
 tower = { version = "0.5", optional = true }
 http = { version = "1", optional = true }
 

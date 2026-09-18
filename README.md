@@ -24,12 +24,12 @@ No Kubernetes dependency. Tested end-to-end against [Dex](https://dexidp.io/) v2
 | `mcp-server` | no      | MCP resource-server helpers on top of `server`: OAuth Protected Resource Metadata, MCP `WWW-Authenticate` challenges, and required bearer auth middleware                                           |
 | `oauth`      | no      | Provider-agnostic OAuth 2.0 access-token grants: RFC 9728/8414 discovery, PKCE, loopback callback, dynamic registration, keyed token storage, and refresh orchestration |
 | `rust_crypto` | yes    | jsonwebtoken's pure-Rust crypto backend                                                                                                                                                              |
-| `aws_lc_rs`  | no      | jsonwebtoken's aws-lc-rs crypto backend — pick this instead of `rust_crypto` if your app already links aws-lc-rs (e.g. via rustls), to avoid enabling both backends                                  |
+| `aws_lc_rs`  | no      | jsonwebtoken's aws-lc-rs crypto backend — pick this instead of `rust_crypto` if another dependency already enables jsonwebtoken's `aws_lc_rs`, to avoid enabling both backends (linking aws-lc-rs through rustls does not)                                  |
 | `aws-lc-tls` | yes     | Outbound HTTPS (discovery, JWKS, token endpoint) through reqwest's rustls with its bundled aws-lc-rs provider. Implied by `client`, `browser-login`, `server`, `oauth` (and so `keyring`, `mcp-server`) |
 | `client-core` | no     | `client` without choosing a TLS provider, for builds that keep aws-lc-rs out (e.g. ring-only). HTTPS still works: install a rustls `CryptoProvider` before building any HTTP client (`AuthClient`, discovery, refresh) |
 | `browser-login-core` | no | `browser-login` without choosing a TLS provider; see `client-core` |
 
-**Upgrading from 0.11:** outbound HTTPS now needs a rustls provider. Every feature that makes HTTP calls (`client`, `browser-login`, `server`, `oauth`, and so `keyring`, `mcp-server`) implies `aws-lc-tls`, which supplies one, so those builds are unchanged. A build with `default-features = false` and none of them (for example only `rust_crypto`) that uses `JwksManager` directly must now add `aws-lc-tls` or install a rustls provider itself; otherwise building the client fails with a message saying so.
+**Upgrading from 0.11:** outbound HTTPS now needs a rustls provider. Every feature that makes HTTP calls (`client`, `browser-login`, `server`, `oauth`, and so `keyring`, `mcp-server`) implies `aws-lc-tls`, which supplies one, so those builds are unchanged. A build with `default-features = false` and none of them (for example only `rust_crypto`) that uses `JwksManager` directly must now add `aws-lc-tls` or install a rustls provider itself; otherwise reqwest panics when the client is built.
 
 ```toml
 # Server only (no browser deps)

@@ -124,7 +124,6 @@ struct ValidationCache {
 
 impl JwksManager {
     pub fn new() -> Self {
-        crate::common::crypto::require_tls_provider();
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(10))
