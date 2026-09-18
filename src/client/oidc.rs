@@ -454,6 +454,7 @@ async fn fetch_revocation_disco(issuer: &str) -> Result<RevocationDiscovery> {
 }
 
 fn build_basic_http() -> Result<reqwest::Client> {
+    crate::common::crypto::require_tls_provider();
     reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(10))
@@ -602,6 +603,7 @@ pub async fn begin_device_flow_with_url(
         crate::client::discovery::enforce_secure_transport(url, what)?;
     }
 
+    crate::common::crypto::require_tls_provider();
     let http = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(30))
@@ -790,6 +792,7 @@ async fn fetch_discovery(issuer: &str) -> Result<DiscoveryDoc> {
         "{}/.well-known/openid-configuration",
         issuer.trim_end_matches('/')
     );
+    crate::common::crypto::require_tls_provider();
     let resp = reqwest::Client::builder()
         .connect_timeout(Duration::from_secs(5))
         .timeout(Duration::from_secs(10))

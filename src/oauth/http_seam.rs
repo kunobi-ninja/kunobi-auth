@@ -193,6 +193,7 @@ pub(crate) fn redirect_allowed(from: &Url, to: &Url) -> bool {
 impl ReqwestHttp {
     pub fn new() -> anyhow::Result<Self> {
         let base = || {
+            crate::common::crypto::require_tls_provider();
             reqwest::Client::builder()
                 .timeout(Duration::from_secs(20))
                 .user_agent("kunobi-agentgateway")

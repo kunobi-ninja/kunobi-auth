@@ -26,3 +26,25 @@ pub fn ensure_crypto_provider() {
         let _ = jsonwebtoken::crypto::aws_lc::DEFAULT_PROVIDER.install_default();
     });
 }
+
+/// Fail clearly when outbound HTTP has no TLS provider.
+///
+/// With the `aws-lc-tls` feature, reqwest brings its own rustls provider and
+/// this is a no-op. Without it (the `-core` features, or `default-features =
+/// false` with no feature that implies it), the application must install a
+/// rustls [`CryptoProvider`] before kunobi-auth builds an HTTP client;
+/// otherwise reqwest panics with a message that does not say why. Call this
+/// right before every `reqwest::Client::builder()`.
+///
+/// [`CryptoProvider`]: https://docs.rs/rustls/latest/rustls/crypto/struct.CryptoProvider.html
+pub(crate) fn require_tls_provider() {
+    #[cfg(not(feature = "aws-lc-tls"))]
+    if rustls::crypto::CryptoProvider::get_default().is_none() {
+        panic!(
+            "kunobi-auth: no rustls CryptoProvider is installed for outbound HTTPS. \
+             Enable the `aws-lc-tls` feature, or install a provider before building an \
+             HTTP client or JwksManager, e.g. \
+             `rustls::crypto::ring::default_provider().install_default()`"
+        );
+    }
+}
