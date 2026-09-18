@@ -1,6 +1,6 @@
 [package]
 name = "kunobi-auth"
-version = "0.11.1"
+version = "0.12.0"
 edition = "2024"
 rust-version = "1.94"
 license = "Apache-2.0"
@@ -14,7 +14,11 @@ categories = ["authentication", "web-programming"]
 include = ["/src/**/*.rs", "/README.md", "/LICENSE"]
 
 [features]
-default = ["client", "browser-login", "server", "rust_crypto"]
+default = ["client", "browser-login", "server", "rust_crypto", "aws-lc-tls"]
+# TLS for outbound HTTP (discovery, JWKS, token endpoint): reqwest's rustls
+# with its bundled aws-lc-rs provider. Every feature below that makes HTTP
+# calls implies it, except the `-core` variants.
+aws-lc-tls = ["reqwest/rustls"]
 # jsonwebtoken crypto backend selection. Cargo unifies features across the
 # whole dependency graph, and jsonwebtoken 10 panics on first signer/verifier
 # use when BOTH backends end up enabled (it cannot auto-select a provider).
@@ -27,19 +31,26 @@ rust_crypto = ["jsonwebtoken/rust_crypto"]
 aws_lc_rs = ["jsonwebtoken/aws_lc_rs"]
 # Client token management: cached token store, refresh, revocation,
 # introspection, device-grant. Axum-free.
-client = ["dep:dirs", "dep:tempfile", "dep:sysinfo", "dep:openidconnect", "dep:oauth2"]
+client = ["client-core", "aws-lc-tls"]
+# `client` without choosing a TLS provider, for consumers that keep aws-lc-rs
+# out of their build (e.g. ring-only). HTTPS still works once the consumer
+# installs a rustls CryptoProvider, which must happen before any HTTP client
+# is built.
+client-core = ["dep:dirs", "dep:tempfile", "dep:sysinfo", "dep:openidconnect", "dep:oauth2"]
 # Interactive browser-based OIDC login (PKCE). Adds a localhost callback
 # server (axum) + a browser opener. Separable so client consumers that
 # drive their own login (e.g. desktop apps) avoid the axum dependency.
-browser-login = ["client", "dep:open", "dep:axum"]
+browser-login = ["browser-login-core", "client"]
+# `browser-login` without a TLS provider; see `client-core`.
+browser-login-core = ["client-core", "dep:open", "dep:axum"]
 # Server-side axum integration: AuthLayer/tower, extractors, ConfiguredAuth,
 # and `AuthError: IntoResponse`. The JWKS/JWT validation core (JwksManager),
 # DPoP, SSH-signature verification, and audit log are available WITHOUT this.
-server = ["dep:axum", "dep:tower", "dep:http"]
+server = ["dep:axum", "dep:tower", "dep:http", "aws-lc-tls"]
 mcp-server = ["server"]
 # Provider-agnostic access-token grants for external APIs and MCP servers.
 # Hosts own browser/UI and keychain integration; no OIDC session or Axum deps.
-oauth = ["dep:async-trait", "dep:getrandom", "dep:url", "dep:zeroize", "tokio/io-util"]
+oauth = ["dep:async-trait", "dep:getrandom", "dep:url", "dep:zeroize", "tokio/io-util", "aws-lc-tls"]
 # OS keychain-backed token storage (macOS Keychain / Windows Credential
 # Manager). Linux Secret Service can be added later via the keyring crate's
 # `sync-secret-service` feature.
@@ -48,7 +59,7 @@ keyring = ["client", "dep:keyring"]
 [dependencies]
 # HTTP / Web
 axum = { version = "0.8", optional = true }
-reqwest = { version = "0.13", features = ["json", "form", "rustls"], default-features = false }
+reqwest = { version = "0.13", features = ["json", "form", "rustls-no-provider"], default-features = false }
 tower = { version = "0.5", optional = true }
 http = { version = "1", optional = true }
 

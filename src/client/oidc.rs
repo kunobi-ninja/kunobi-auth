@@ -1,24 +1,24 @@
 use anyhow::{Context, Result};
-#[cfg(feature = "browser-login")]
+#[cfg(feature = "browser-login-core")]
 use axum::extract::Query;
-#[cfg(feature = "browser-login")]
+#[cfg(feature = "browser-login-core")]
 use axum::response::Html;
-#[cfg(feature = "browser-login")]
+#[cfg(feature = "browser-login-core")]
 use axum::routing::get;
-#[cfg(feature = "browser-login")]
+#[cfg(feature = "browser-login-core")]
 use openidconnect::core::CoreAuthenticationFlow;
 use openidconnect::core::{CoreClient, CoreProviderMetadata};
 use openidconnect::{
     ClientId, IssuerUrl, Nonce, OAuth2TokenResponse, RedirectUrl, RefreshToken, TokenResponse,
 };
 // Browser-login-only OIDC types (authorization-code flow + PKCE).
-#[cfg(feature = "browser-login")]
+#[cfg(feature = "browser-login-core")]
 use openidconnect::{AuthorizationCode, CsrfToken, PkceCodeChallenge, Scope};
 use serde::Deserialize;
-#[cfg(feature = "browser-login")]
+#[cfg(feature = "browser-login-core")]
 use std::collections::HashMap;
 use std::time::{Duration, Instant};
-#[cfg(feature = "browser-login")]
+#[cfg(feature = "browser-login-core")]
 use tokio::sync::oneshot;
 use tracing::{info, warn};
 
@@ -40,7 +40,7 @@ fn build_http_client() -> Result<openidconnect::reqwest::Client> {
 /// 5. Exchanges the auth code for tokens
 /// 6. Validates the ID token (signature, expiry, aud, iss, nonce)
 /// 7. Returns the stored token
-#[cfg(feature = "browser-login")]
+#[cfg(feature = "browser-login-core")]
 pub async fn browser_login(
     issuer: &str,
     client_id: &str,
@@ -812,7 +812,7 @@ async fn fetch_discovery(issuer: &str) -> Result<DiscoveryDoc> {
 }
 
 /// Minimal HTML escaping for text reflected into the callback response page.
-#[cfg(feature = "browser-login")]
+#[cfg(feature = "browser-login-core")]
 fn html_escape(s: &str) -> String {
     s.chars()
         .map(|c| match c {

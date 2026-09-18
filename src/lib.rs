@@ -6,7 +6,7 @@
 //! # Client usage (CLI, apps)
 //! ```rust,no_run
 //! # async fn example() -> anyhow::Result<()> {
-//! # #[cfg(feature = "client")] {
+//! # #[cfg(feature = "client-core")] {
 //! use kunobi_auth::client::{AuthClient, ServiceConfig};
 //!
 //! let config = ServiceConfig::discover("https://kobe.kunobi.ninja").await?;
@@ -45,7 +45,7 @@ pub mod common;
 #[cfg(feature = "oauth")]
 pub mod oauth;
 
-#[cfg(feature = "client")]
+#[cfg(feature = "client-core")]
 pub mod client;
 
 pub mod server;

@@ -15,7 +15,7 @@
 //!
 //! Run in CI: see `.github/workflows/ci.yml` (`e2e` job).
 
-#![cfg(feature = "client")]
+#![cfg(feature = "client-core")]
 
 use kunobi_auth::server::JwksManager;
 use serde::Deserialize;

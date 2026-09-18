@@ -3,8 +3,8 @@
 /// Ensure a process-level jsonwebtoken [`CryptoProvider`] is installed.
 ///
 /// Cargo unifies features across the whole dependency graph: when both
-/// `rust_crypto` and `aws_lc_rs` end up enabled (e.g. a desktop app that links
-/// aws-lc-rs via rustls while this crate defaults to `rust_crypto`),
+/// `rust_crypto` and `aws_lc_rs` end up enabled (e.g. one dependency selects
+/// jsonwebtoken's `aws_lc_rs` while this crate defaults to `rust_crypto`),
 /// jsonwebtoken 10 cannot auto-select a provider and panics on first
 /// signer/verifier use. Installing one explicitly before our own JWT
 /// operations makes validation deterministic for every consumer.
