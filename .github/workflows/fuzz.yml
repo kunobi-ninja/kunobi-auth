@@ -1,0 +1,45 @@
+name: Fuzz
+
+on:
+  # Coverage-guided fuzzing is too slow for per-PR gating; run it weekly and
+  # on demand. Findings go to the security tracker, not the PR.
+  schedule:
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+
+jobs:
+  fuzz:
+    name: Fuzz (${{ matrix.target }})
+    runs-on: kunobi-runners
+    timeout-minutes: 60
+    strategy:
+      fail-fast: false
+      matrix:
+        target:
+          - parse_ssh_auth_header
+          - split_header_params
+          - parse_authorized_key
+          - verify_dpop_proof
+    steps:
+      - uses: actions/checkout@v7
+
+      - name: Install nightly Rust + cargo-fuzz
+        uses: jdx/mise-action@v4
+        with:
+          experimental: true
+          install_args: rust@nightly
+
+      - name: Install cargo-fuzz
+        run: cargo install cargo-fuzz --locked
+
+      - name: Fuzz ${{ matrix.target }} (10 min)
+        working-directory: fuzz
+        run: cargo +nightly fuzz run ${{ matrix.target }} -- -max_total_time=600 -print_final_stats=1
+
+      - name: Upload crashers
+        if: failure()
+        uses: actions/upload-artifact@v7
+        with:
+          name: fuzz-crashers-${{ matrix.target }}
+          path: fuzz/artifacts/${{ matrix.target }}/
+          if-no-files-found: warn

@@ -13,8 +13,11 @@ use ssh_key::{HashAlg, PublicKey, SshSig};
 /// Information about an SSH key.
 #[derive(Debug, Clone)]
 pub struct SshKeyInfo {
+    /// Key fingerprint identifying the key.
     pub fingerprint: String,
+    /// Comment from the key entry.
     pub comment: String,
+    /// Key type string.
     pub key_type: String,
 }
 

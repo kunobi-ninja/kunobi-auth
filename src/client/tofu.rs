@@ -14,9 +14,11 @@
 //!   mismatch *or* on an unpinned service, so a caller cannot silently trust
 //!   a new or changed endpoint.
 //!
-//! The store is process-local-locked (`std::sync::Mutex`) and writes are
-//! atomic via `tempfile::persist`, so concurrent `verify`/`trust` calls
-//! within a process do not race. File permissions are set to `0o600` so
+//! The store holds a process-local `Mutex` plus a cross-process advisory file
+//! lock (same mechanism as the refresh lock), so concurrent `check_and_pin` /
+//! `trust` calls neither race within a process nor lose pins across processes.
+//! Writes are atomic via `tempfile::persist`, so a concurrent reader never
+//! observes a half-written file. File permissions are set to `0o600` so
 //! only the owner can read or modify the trust list.
 
 use anyhow::{Context, Result};
@@ -39,8 +41,11 @@ pub struct KnownService {
     /// [`TofuStore::verify_or_reject`] until re-trusted.
     #[serde(default)]
     pub issuer: String,
+    /// The pinned audience.
     pub audience: String,
+    /// When the endpoint was first pinned.
     pub first_seen: String,
+    /// When the endpoint was last verified.
     pub last_seen: String,
 }
 
@@ -49,20 +54,31 @@ pub struct KnownService {
 #[non_exhaustive]
 pub enum TofuResult {
     /// The endpoint has never been seen before.
-    FirstConnect { endpoint: String, audience: String },
+    FirstConnect {
+        /// Endpoint seen for the first time.
+        endpoint: String,
+        /// Audience presented on first connect.
+        audience: String,
+    },
     /// The endpoint is known and both issuer and audience match.
     Trusted,
     /// The endpoint is known but the audience has changed.
     AudienceChanged {
+        /// Endpoint whose audience changed.
         endpoint: String,
+        /// Previously pinned audience.
         previous: String,
+        /// Newly presented audience.
         current: String,
     },
     /// The endpoint is known but the issuer has changed (possible MITM
     /// steering the client onto an attacker-controlled IdP).
     IssuerChanged {
+        /// Endpoint whose issuer changed.
         endpoint: String,
+        /// Previously pinned issuer.
         previous: String,
+        /// Newly presented issuer.
         current: String,
     },
 }
@@ -158,6 +174,10 @@ impl TofuStore {
         issuer: &str,
         audience: &str,
     ) -> Result<TofuResult> {
+        // Cross-process first, then in-process: the read-modify-write below
+        // must serialize against other processes too, or concurrent first
+        // contacts lose pins (last-writer-wins).
+        let _file_lock = super::lock::ProcessLock::acquire("tofu", endpoint)?;
         let _guard = self
             .lock
             .lock()
@@ -253,6 +273,7 @@ impl TofuStore {
     /// `audience`. Overwrites any previous pin for the endpoint (this is how a
     /// legacy or rotated entry is upgraded).
     pub fn trust(&self, endpoint: &str, issuer: &str, audience: &str) -> Result<()> {
+        let _file_lock = super::lock::ProcessLock::acquire("tofu", endpoint)?;
         let _guard = self
             .lock
             .lock()

@@ -57,7 +57,8 @@ struct Jwk {
     e: Option<String>,
     x: Option<String>,
     y: Option<String>,
-    #[allow(dead_code)]
+    /// Curve for EC/OKP keys. Required by RFC 7518/8037 and checked against
+    /// the token's `alg` (see `check_key_alg_binding`).
     crv: Option<String>,
     /// Intended use ("sig" / "enc"). Absent means unrestricted.
     #[serde(rename = "use")]
@@ -122,8 +123,49 @@ struct ValidationCache {
     ttl: Duration,
 }
 
+/// Options for [`JwksManager::validate`] — the single params-struct behind the
+/// `validate_jwt*` family. Prefer this over the positional-argument shims so
+/// future knobs (per-call leeway, required claims, DPoP `cnf` checks) don't
+/// need a fifth spelling.
+#[derive(Debug, Clone)]
+pub struct ValidateOptions {
+    /// JWKS document URL (HTTPS outside loopback/test hosts).
+    pub jwks_url: String,
+    /// Expected `iss` claim (required, non-empty).
+    pub issuer: String,
+    /// Accepted `aud` values. May be empty only when `authorized_parties` is set.
+    pub audience: Vec<String>,
+    /// Accepted `azp` values. May be empty only when `audience` is set.
+    pub authorized_parties: Vec<String>,
+    /// Allowed signing algorithms (e.g. `["RS256"]`).
+    pub algorithms: Vec<String>,
+}
+
+impl ValidateOptions {
+    /// Build options. At least one of `audience` / `authorized_parties` must
+    /// be non-empty — `validate` refuses both-empty (token confusion).
+    pub fn new(
+        jwks_url: impl Into<String>,
+        issuer: impl Into<String>,
+        audience: Vec<String>,
+        authorized_parties: Vec<String>,
+        algorithms: Vec<String>,
+    ) -> Self {
+        Self {
+            jwks_url: jwks_url.into(),
+            issuer: issuer.into(),
+            audience,
+            authorized_parties,
+            algorithms,
+        }
+    }
+}
+
 impl JwksManager {
-    pub fn new() -> Self {
+    /// Fallible constructor. Fails only when the HTTP client cannot be built
+    /// (typically a missing rustls `CryptoProvider` in `-core` feature builds
+    /// without TLS — see `client-core` docs). Prefer this over [`new`](Self::new).
+    pub fn try_new() -> Result<Self> {
         let http = reqwest::Client::builder()
             .connect_timeout(Duration::from_secs(5))
             .timeout(Duration::from_secs(10))
@@ -132,14 +174,23 @@ impl JwksManager {
             // attacker-controlled host (SSRF / key substitution).
             .redirect(reqwest::redirect::Policy::none())
             .build()
-            .expect("Failed to build HTTP client");
-        Self {
+            .context(
+                "failed to build JWKS HTTP client (missing rustls CryptoProvider? \
+                 install one before first use in -core builds)",
+            )?;
+        Ok(Self {
             http,
             cache: RwLock::new(HashMap::new()),
             fetch_locks: tokio::sync::Mutex::new(HashMap::new()),
             validation_cache: None,
             leeway: DEFAULT_JWT_LEEWAY,
-        }
+        })
+    }
+
+    /// Infallible constructor. Panics only when [`try_new`](Self::try_new)
+    /// fails (TLS backend misconfiguration); prefer `try_new` in libraries.
+    pub fn new() -> Self {
+        Self::try_new().expect("Failed to build HTTP client")
     }
 
     /// Set the clock-skew tolerance for `exp`/`nbf` validation.
@@ -176,12 +227,32 @@ impl JwksManager {
         self
     }
 
+    /// Validate a JWT against `options` and return its claims.
+    ///
+    /// This is the canonical entry point; [`validate_jwt`](Self::validate_jwt)
+    /// and [`validate_jwt_bound`](Self::validate_jwt_bound) are thin shims.
+    pub async fn validate(
+        &self,
+        token: &str,
+        options: &ValidateOptions,
+    ) -> Result<HashMap<String, serde_json::Value>> {
+        self.validate_jwt_bound(
+            token,
+            &options.jwks_url,
+            &options.issuer,
+            &options.audience,
+            &options.authorized_parties,
+            &options.algorithms,
+        )
+        .await
+    }
+
     /// Validate a JWT and return its claims.
     ///
     /// Both `issuer` and `audience` are required and validated against the `iss`
     /// / `aud` claims. Pass at least one audience. For providers that bind tokens
     /// via `azp` instead of `aud` (e.g. some OIDC session tokens), use
-    /// [`JwksManager::validate_jwt_bound`].
+    /// [`JwksManager::validate_jwt_bound`] or [`JwksManager::validate`].
     pub async fn validate_jwt(
         &self,
         token: &str,
@@ -329,6 +400,9 @@ impl JwksManager {
                 // server-side logs.
                 let key = find_matching_key(&keys, kid)
                     .map_err(|e| e.context("unknown signing key (kid)"))?;
+                // Bind kty/crv to the token alg before crypto: precise
+                // rejection instead of a generic decode failure.
+                check_key_alg_binding(key, &header.alg)?;
                 let decoding_key = build_decoding_key(key)?;
                 decode::<HashMap<String, serde_json::Value>>(token, &decoding_key, &validation)
                     .map_err(|e| {
@@ -342,7 +416,7 @@ impl JwksManager {
                 // `kid` is optional (RFC 7515 §4.1.4): a kid-less token from
                 // an IdP with several signing keys must be tried against each
                 // candidate, not just the first.
-                decode_with_any_key(token, &keys, &validation)?
+                decode_with_any_key(token, &keys, &header.alg, &validation)?
             };
 
             // Populate the validation cache, capping TTL by token.exp.
@@ -603,10 +677,16 @@ async fn insert_validated(
 fn decode_with_any_key(
     token: &str,
     keys: &[Jwk],
+    alg: &Algorithm,
     validation: &Validation,
 ) -> Result<jsonwebtoken::TokenData<HashMap<String, serde_json::Value>>> {
     let mut last_err: Option<anyhow::Error> = None;
     for key in keys.iter().filter(|k| k.is_signing_key()) {
+        // Skip keys whose type/curve cannot speak this alg before crypto.
+        if let Err(e) = check_key_alg_binding(key, alg) {
+            last_err = Some(e);
+            continue;
+        }
         let decoding_key = match build_decoding_key(key) {
             Ok(k) => k,
             Err(e) => {
@@ -756,6 +836,29 @@ fn is_loopback_url(url: &reqwest::Url) -> bool {
         return true;
     }
     host.parse::<IpAddr>().is_ok_and(|ip| ip.is_loopback())
+}
+
+/// Bind the selected JWK to the token's `alg` before any crypto.
+///
+/// `jsonwebtoken` would reject a kty/alg mismatch at decode time, but with a
+/// generic error. Checking explicitly turns key confusion (e.g. an RSA key
+/// selected by `kid` for an ES256 token, or a P-384 key for ES256) into a
+/// precise, redaction-safe rejection — and pins the `crv` claim instead of
+/// leaving it unread.
+fn check_key_alg_binding(key: &Jwk, alg: &Algorithm) -> Result<()> {
+    let need_crv = |want: &str| match key.crv.as_deref() {
+        Some(got) if got == want => Ok(()),
+        Some(got) => anyhow::bail!("JWK curve {got:?} does not match token alg {alg:?}"),
+        None => anyhow::bail!("JWK is missing the required 'crv' for token alg {alg:?}"),
+    };
+    match (key.kty.as_str(), alg) {
+        ("RSA", Algorithm::RS256 | Algorithm::RS384 | Algorithm::RS512)
+        | ("RSA", Algorithm::PS256 | Algorithm::PS384 | Algorithm::PS512) => Ok(()),
+        ("EC", Algorithm::ES256) => need_crv("P-256"),
+        ("EC", Algorithm::ES384) => need_crv("P-384"),
+        ("OKP", Algorithm::EdDSA) => need_crv("Ed25519"),
+        (kty, _) => anyhow::bail!("JWK type {kty:?} does not match token alg {alg:?}"),
+    }
 }
 
 fn build_decoding_key(key: &Jwk) -> Result<DecodingKey> {
@@ -1020,6 +1123,66 @@ mod tests {
                 .unwrap()
                 .to_string()
                 .contains("Unsupported key type")
+        );
+    }
+
+    fn key_binding_fixture(kty: &str, crv: Option<&str>) -> Jwk {
+        Jwk {
+            kid: None,
+            kty: kty.to_string(),
+            n: None,
+            e: None,
+            x: None,
+            y: None,
+            crv: crv.map(str::to_string),
+            use_: None,
+            key_ops: None,
+        }
+    }
+
+    #[test]
+    fn key_alg_binding_accepts_matching_pairs() {
+        assert!(
+            check_key_alg_binding(&key_binding_fixture("RSA", None), &Algorithm::RS256).is_ok()
+        );
+        assert!(
+            check_key_alg_binding(&key_binding_fixture("RSA", None), &Algorithm::PS512).is_ok()
+        );
+        assert!(
+            check_key_alg_binding(&key_binding_fixture("EC", Some("P-256")), &Algorithm::ES256)
+                .is_ok()
+        );
+        assert!(
+            check_key_alg_binding(&key_binding_fixture("EC", Some("P-384")), &Algorithm::ES384)
+                .is_ok()
+        );
+        assert!(
+            check_key_alg_binding(
+                &key_binding_fixture("OKP", Some("Ed25519")),
+                &Algorithm::EdDSA
+            )
+            .is_ok()
+        );
+    }
+
+    #[test]
+    fn key_alg_binding_rejects_confusion() {
+        // RSA key for an EC token.
+        assert!(
+            check_key_alg_binding(&key_binding_fixture("RSA", None), &Algorithm::ES256).is_err()
+        );
+        // P-384 key for ES256.
+        assert!(
+            check_key_alg_binding(&key_binding_fixture("EC", Some("P-384")), &Algorithm::ES256)
+                .is_err()
+        );
+        // EC key with no curve at all.
+        assert!(
+            check_key_alg_binding(&key_binding_fixture("EC", None), &Algorithm::ES256).is_err()
+        );
+        // Unknown key type.
+        assert!(
+            check_key_alg_binding(&key_binding_fixture("oct", None), &Algorithm::RS256).is_err()
         );
     }
 

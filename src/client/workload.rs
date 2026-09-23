@@ -23,8 +23,9 @@ use std::collections::HashMap;
 use std::sync::Mutex;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-/// Where the Actions runtime serves ID tokens, and the bearer it takes.
+/// Where the Actions runtime serves ID tokens.
 pub const GITHUB_REQUEST_URL: &str = "ACTIONS_ID_TOKEN_REQUEST_URL";
+/// Bearer the Actions runtime takes for ID token requests.
 pub const GITHUB_REQUEST_TOKEN: &str = "ACTIONS_ID_TOKEN_REQUEST_TOKEN";
 /// A GitLab CI ID token minted for the service.
 pub const ID_TOKEN_VAR: &str = "KUNOBI_ID_TOKEN";
@@ -38,15 +39,22 @@ const EXPIRY_MARGIN: Duration = Duration::from_secs(60);
 /// Which platform a token came from.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WorkloadKind {
+    /// Token from GitHub Actions OIDC.
     GitHubActions,
+    /// Token from GitLab CI.
     GitLabCi,
+    /// Token from a Kubernetes service account.
     Kubernetes,
 }
 
+/// Workload token presented to a Kunobi service.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct WorkloadToken {
+    /// Platform the token came from.
     pub kind: WorkloadKind,
+    /// Token value to present.
     pub token: String,
+    /// When the token expires.
     pub expires_at: SystemTime,
 }
 
@@ -62,11 +70,14 @@ impl WorkloadToken {
 pub struct WorkloadSources {
     /// The Actions runtime's ID token request URL and bearer.
     pub github: Option<(String, String)>,
+    /// GitLab CI ID token value.
     pub id_token: Option<String>,
+    /// Path to the service-account token file.
     pub sa_token_file: Option<String>,
 }
 
 impl WorkloadSources {
+    /// Read workload sources from the process environment.
     pub fn from_env() -> Self {
         let var = |name: &str| std::env::var(name).ok().filter(|value| !value.is_empty());
         Self {

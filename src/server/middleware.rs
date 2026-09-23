@@ -86,9 +86,12 @@ where
     type Rejection = AuthError;
 
     async fn from_request_parts(parts: &mut Parts, state: &S) -> Result<Self, Self::Rejection> {
-        let token = match extract_bearer_token(parts) {
-            Ok(token) => token,
-            Err(_) => return Ok(OptionalAuth(None)),
+        // Optional mode passes through only when NO header is present. A
+        // present-but-malformed header is a 401, never a silent downgrade to
+        // anonymous.
+        let token = match extract_bearer_token_optional(parts)? {
+            Some(token) => token,
+            None => return Ok(OptionalAuth(None)),
         };
         let identity = state.authenticate(token).await?;
         Ok(OptionalAuth(Some(identity)))
@@ -103,16 +106,25 @@ where
 /// first -- the safer behaviour than parsing comma-joined values which
 /// `Authorization` doesn't support per its grammar.
 fn extract_bearer_token(parts: &Parts) -> Result<&str, AuthError> {
-    let header = parts
-        .headers
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())
-        .ok_or_else(|| AuthError::Unauthorized("Missing Authorization header".into()))?;
+    extract_bearer_token_optional(parts)?
+        .ok_or_else(|| AuthError::Unauthorized("Missing Authorization header".into()))
+}
+
+/// Like [`extract_bearer_token`](extract_bearer_token), but returns `Ok(None)`
+/// when no header is present so optional mode can pass through. A
+/// present-but-malformed header is still `Err` (401, not anonymous).
+fn extract_bearer_token_optional(parts: &Parts) -> Result<Option<&str>, AuthError> {
+    let Some(value) = parts.headers.get("authorization") else {
+        return Ok(None);
+    };
+    let header = value
+        .to_str()
+        .map_err(|_| AuthError::Unauthorized("Invalid Authorization header encoding".into()))?;
 
     // Match `Bearer` case-insensitively (RFC 6750 §2.1). `get(..7)` avoids a
     // panic when byte 7 falls inside a multibyte UTF-8 character.
     match header.get(..7) {
-        Some(prefix) if prefix.eq_ignore_ascii_case("Bearer ") => Ok(&header[7..]),
+        Some(prefix) if prefix.eq_ignore_ascii_case("Bearer ") => Ok(Some(&header[7..])),
         _ => Err(AuthError::Unauthorized("Expected Bearer token".into())),
     }
 }
@@ -247,6 +259,19 @@ mod tests {
     async fn optional_auth_invalid_token_returns_error() {
         let req = Request::builder()
             .header("Authorization", "Bearer wrong-token")
+            .body(())
+            .unwrap();
+        let (mut parts, _) = req.into_parts();
+
+        let result = OptionalAuth::from_request_parts(&mut parts, &TestState).await;
+        assert!(result.is_err());
+    }
+
+    #[tokio::test]
+    async fn optional_auth_non_bearer_scheme_returns_error() {
+        // Present-but-malformed must 401, not downgrade to anonymous.
+        let req = Request::builder()
+            .header("Authorization", "Basic dXNlcjpwYXNz")
             .body(())
             .unwrap();
         let (mut parts, _) = req.into_parts();

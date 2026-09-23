@@ -53,12 +53,19 @@ pub struct ConfiguredAuth {
 /// JWT validation config for one issuer/provider.
 #[derive(Debug, Clone)]
 pub struct JwtAuthConfig {
+    /// Provider name reported in identities and telemetry.
     pub provider: String,
+    /// Method label reported in identities.
     pub method: String,
+    /// Expected token issuer.
     pub issuer: String,
+    /// URL serving the issuer signing keys.
     pub jwks_url: String,
+    /// Accepted token audiences.
     pub audience: Vec<String>,
+    /// Accepted JWT signing algorithms.
     pub algorithms: Vec<String>,
+    /// Claim used as the identity string.
     pub identity_claim: String,
     /// Accepted `azp` (authorized party) values. When non-empty, the validated
     /// token's `azp` claim must be present and match one of these; empty means
@@ -69,17 +76,23 @@ pub struct JwtAuthConfig {
 /// Static Bearer token config.
 #[derive(Clone)]
 pub struct StaticTokenConfig {
+    /// Provider name reported in identities.
     pub provider: String,
+    /// Expected Bearer token value.
     pub token: String,
+    /// Identity reported when the token matches.
     pub identity: String,
+    /// Extra claims attached to the identity.
     pub claims: HashMap<String, Value>,
 }
 
 impl AuthBuilder {
+    /// Create an empty auth builder.
     pub fn new() -> Self {
         Self::default()
     }
 
+    /// Cache successful JWT validations for `ttl`.
     pub fn validation_cache(mut self, ttl: Duration) -> Self {
         self.validation_cache_ttl = Some(ttl);
         self
@@ -101,11 +114,13 @@ impl AuthBuilder {
         self
     }
 
+    /// Register a JWT provider config.
     pub fn jwt(mut self, config: JwtAuthConfig) -> Self {
         self.jwt.push(config);
         self
     }
 
+    /// Register a JWT provider from explicit OIDC parameters.
     pub fn oidc(
         self,
         provider: impl Into<String>,
@@ -116,6 +131,7 @@ impl AuthBuilder {
         self.jwt(JwtAuthConfig::oidc(provider, issuer, jwks_url, audience))
     }
 
+    /// Register a static Bearer token.
     pub fn static_token(
         mut self,
         provider: impl Into<String>,
@@ -127,8 +143,15 @@ impl AuthBuilder {
         self
     }
 
+    /// Build the configured auth provider, panicking on client setup failure.
     pub fn build(self) -> ConfiguredAuth {
-        let mut jwks = JwksManager::new();
+        self.try_build()
+            .expect("failed to build auth HTTP client (missing rustls CryptoProvider?)")
+    }
+
+    /// Fallible [`build`](Self::build). Prefer this in libraries.
+    pub fn try_build(self) -> Result<ConfiguredAuth, anyhow::Error> {
+        let mut jwks = JwksManager::try_new()?;
         if let Some(ttl) = self.validation_cache_ttl {
             jwks = jwks.with_validation_cache(ttl);
         }
@@ -136,16 +159,17 @@ impl AuthBuilder {
             jwks = jwks.with_leeway(leeway);
         }
 
-        ConfiguredAuth {
+        Ok(ConfiguredAuth {
             jwks: Arc::new(jwks),
             jwt: Arc::new(self.jwt),
             static_tokens: Arc::new(self.static_tokens),
             observer: self.observer,
-        }
+        })
     }
 }
 
 impl JwtAuthConfig {
+    /// Create a JWT config with default algorithm and identity claim.
     pub fn oidc(
         provider: impl Into<String>,
         issuer: impl Into<String>,
@@ -212,6 +236,7 @@ impl JwtAuthConfig {
         )
     }
 
+    /// Set the accepted JWT signing algorithms.
     pub fn algorithms(mut self, algorithms: Vec<String>) -> Self {
         self.algorithms = algorithms;
         self
@@ -224,11 +249,13 @@ impl JwtAuthConfig {
         self
     }
 
+    /// Set the claim used as the identity string.
     pub fn identity_claim(mut self, claim: impl Into<String>) -> Self {
         self.identity_claim = claim.into();
         self
     }
 
+    /// Set the method label reported in identities.
     pub fn method(mut self, method: impl Into<String>) -> Self {
         self.method = method.into();
         self
@@ -236,6 +263,7 @@ impl JwtAuthConfig {
 }
 
 impl StaticTokenConfig {
+    /// Create a static token config with no extra claims.
     pub fn new(
         provider: impl Into<String>,
         token: impl Into<String>,
@@ -249,6 +277,7 @@ impl StaticTokenConfig {
         }
     }
 
+    /// Set extra claims attached to the identity.
     pub fn claims(mut self, claims: HashMap<String, Value>) -> Self {
         self.claims = claims;
         self

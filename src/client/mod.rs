@@ -1,6 +1,7 @@
 mod config;
 mod discovery;
 mod lock;
+/// OIDC authentication flows and token handling.
 pub mod oidc;
 pub mod session;
 pub mod ssh;
@@ -22,9 +23,13 @@ use anyhow::{Context, Result};
 use tracing::info;
 
 /// Token provider -- either OIDC, static token, or SSH key.
+#[non_exhaustive]
 pub enum TokenProvider {
+    /// OIDC provider using a service config.
     Oidc(ServiceConfig),
+    /// Static token provider.
     Static(StaticTokenAuth),
+    /// SSH key provider using the local agent or key file.
     Ssh(SshAgentAuth),
 }
 

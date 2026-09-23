@@ -20,6 +20,22 @@ pub struct AuthIdentity {
 }
 
 impl AuthIdentity {
+    /// Construct an identity. Prefer this over a struct literal so future
+    /// fields (added with `#[serde(default)]`) don't break callers.
+    pub fn new(
+        provider: impl Into<String>,
+        identity: impl Into<String>,
+        method: impl Into<String>,
+        claims: HashMap<String, serde_json::Value>,
+    ) -> Self {
+        Self {
+            provider: provider.into(),
+            identity: identity.into(),
+            method: method.into(),
+            claims,
+        }
+    }
+
     /// Look up a claim by dot-path into the raw [`claims`](Self::claims) map.
     ///
     /// The path is split on `'.'`; the first segment indexes the claims map and

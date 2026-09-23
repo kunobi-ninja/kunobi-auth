@@ -36,11 +36,16 @@ pub enum ProviderResolution<'a> {
     /// RFC 8414. The metadata hint is an out-of-band URL — a catalog entry, or
     /// one the user pasted.
     ProtectedResource {
+        /// The MCP endpoint to discover the authorization server for.
         url: &'a Url,
+        /// Caller-supplied resource metadata URL tried before probing.
         metadata_hint: Option<&'a Url>,
     },
     /// RFC 8414 / OIDC discovery from a known issuer.
-    Issuer { url: &'a Url },
+    Issuer {
+        /// The known issuer to fetch authorization-server metadata from.
+        url: &'a Url,
+    },
     /// Endpoints the caller states outright, for a provider that publishes no
     /// discovery document.
     ///
@@ -54,9 +59,13 @@ pub enum ProviderResolution<'a> {
         /// against a stored one. Not verified against anything, because there
         /// is no document to verify it against.
         issuer: &'a str,
+        /// The authorization endpoint stated by the caller.
         authorization_endpoint: &'a Url,
+        /// The token endpoint stated by the caller.
         token_endpoint: &'a Url,
+        /// Client authentication methods the token endpoint supports.
         token_endpoint_auth_methods_supported: Vec<String>,
+        /// Scopes the provider supports.
         scopes_supported: Vec<String>,
     },
 }
@@ -76,6 +85,7 @@ pub struct DiscoveredAuth {
     /// resource-metadata document declares. A metadata resource may cover a
     /// broader URL prefix; binding to the requested URL keeps the grant narrow.
     pub resource: Option<String>,
+    /// The authorization-server metadata the flow acts on.
     pub metadata: AuthorizationServerMetadata,
     /// Scopes the resource advertises, for the minimisation step.
     pub resource_scopes: Vec<String>,
@@ -445,14 +455,19 @@ fn require_https(url: &Url, what: &str) -> anyhow::Result<()> {
 
 /// Everything needed to build the authorization request.
 pub struct AuthorizeParams<'a> {
+    /// The client identifier sent on the authorization request.
     pub client_id: &'a str,
+    /// The redirect URI sent on the authorization request.
     pub redirect_uri: &'a str,
+    /// The scopes requested on the authorization request.
     pub scopes: &'a [String],
     /// RFC 8707 audience. `None` for a provider with no resource concept —
     /// discovery from an issuer or from statically declared endpoints yields no
     /// resource, and sending an empty or invented one risks `invalid_request`.
     pub resource: Option<&'a str>,
+    /// The state nonce sent on the authorization request.
     pub state: &'a str,
+    /// The PKCE pair proving the exchange belongs to this flow.
     pub pkce: &'a Pkce,
 }
 

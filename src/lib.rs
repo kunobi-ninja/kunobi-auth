@@ -39,15 +39,20 @@
 //! See `server::AuthnProvider` / `server::RequiredAuth` for the recommended
 //! axum integration, and `server::ssh` for SSH-signature verification.
 
+#![warn(missing_docs)]
+
+/// Shared authn vocabulary (identities, errors, discovery, claim rules).
 pub mod common;
 
 /// OAuth access-token grants keyed by connection, with host-owned UI and storage.
 #[cfg(feature = "oauth")]
 pub mod oauth;
 
+/// OIDC client: login, refresh, token storage, TOFU, workload tokens.
 #[cfg(feature = "client-core")]
 pub mod client;
 
+/// Server-side validation: JWKS/JWT, DPoP, SSH signatures, axum integration.
 pub mod server;
 
 // Re-export common types at crate root

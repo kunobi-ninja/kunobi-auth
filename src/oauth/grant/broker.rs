@@ -45,9 +45,13 @@ pub trait CredentialBroker: Send + Sync {
 /// `only_if_stale_at`.
 pub struct RefreshBroker {
     host: Arc<dyn GrantHost>,
+    /// The connection this broker serves.
     pub connection_id: String,
+    /// The store the token set is loaded from and saved to.
     pub store: Arc<dyn TokenStore>,
+    /// The HTTP seam used for token refresh.
     pub http: Arc<dyn OAuthHttp>,
+    /// The authorization-server metadata used for refresh.
     pub metadata: AuthorizationServerMetadata,
     client_id: String,
     /// Token-endpoint client secret, for a confidential client.
@@ -86,15 +90,25 @@ pub struct RefreshBroker {
 /// Constructor arguments, as a struct because there are nine of them and a
 /// positional call was already `#[allow(clippy::too_many_arguments)]`.
 pub struct RefreshBrokerConfig {
+    /// The grant host notified when re-authorization is needed.
     pub host: Arc<dyn GrantHost>,
+    /// The connection the broker serves.
     pub connection_id: String,
+    /// The store holding the connection's token set.
     pub store: Arc<dyn TokenStore>,
+    /// The HTTP seam used for token requests.
     pub http: Arc<dyn OAuthHttp>,
+    /// The authorization-server metadata used for refresh.
     pub metadata: AuthorizationServerMetadata,
+    /// The client identifier sent on token requests.
     pub client_id: String,
+    /// The client secret, for a confidential client.
     pub client_secret: Option<String>,
+    /// The RFC 8707 audience sent on token requests.
     pub resource: Option<String>,
+    /// The scopes sent on refresh requests.
     pub scopes: Vec<String>,
+    /// The generation of the live resource this broker belongs to.
     pub generation: u64,
     /// Supply the same lock the host takes
     /// around disconnect, delete, and grant completion.
@@ -102,6 +116,7 @@ pub struct RefreshBrokerConfig {
 }
 
 impl RefreshBroker {
+    /// Creates a broker from the given configuration.
     pub fn new(config: RefreshBrokerConfig) -> Self {
         Self {
             host: config.host,

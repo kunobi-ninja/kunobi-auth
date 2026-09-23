@@ -114,10 +114,12 @@ impl From<ClaimMatch> for ClaimAllowed {
 /// absent rule, not an empty one, to express "unconditional".
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ClaimRule {
+    /// Every clause must hold for the rule to match.
     pub all: Vec<ClaimAllowed>,
 }
 
 impl ClaimRule {
+    /// Build a rule from clauses.
     pub fn new(all: impl IntoIterator<Item = ClaimAllowed>) -> Self {
         Self {
             all: all.into_iter().collect(),

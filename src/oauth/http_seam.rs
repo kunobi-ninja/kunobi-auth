@@ -15,7 +15,9 @@ use url::Url;
 /// A JSON response: the status plus the parsed body, if it parsed.
 #[derive(Clone)]
 pub struct JsonResponse {
+    /// The HTTP status code of the response.
     pub status: u16,
+    /// The parsed JSON body, when the response parsed as JSON.
     pub body: Option<serde_json::Value>,
     /// Raw body, retained for diagnosis when `body` did not parse.
     ///
@@ -72,6 +74,7 @@ impl std::fmt::Debug for JsonResponse {
 }
 
 impl JsonResponse {
+    /// Whether the status is in the 2xx range.
     pub fn is_success(&self) -> bool {
         (200..300).contains(&self.status)
     }
@@ -108,6 +111,7 @@ impl JsonResponse {
 /// scripted fake in tests.
 #[async_trait]
 pub trait OAuthHttp: Send + Sync {
+    /// Fetches a JSON document from the given URL.
     async fn get_json(&self, url: &Url) -> anyhow::Result<JsonResponse>;
     /// One unauthenticated request to an MCP endpoint, made only to read the
     /// `WWW-Authenticate` challenge it answers with.
@@ -118,12 +122,14 @@ pub trait OAuthHttp: Send + Sync {
     /// a body. Best-effort by contract: the caller treats any failure as "no
     /// challenge" and falls back to probing.
     async fn probe_challenge(&self, url: &Url) -> anyhow::Result<JsonResponse>;
+    /// Posts form fields to the given URL with optional Basic auth.
     async fn post_form(
         &self,
         url: &Url,
         form: &[(String, String)],
         basic_auth: Option<(String, String)>,
     ) -> anyhow::Result<JsonResponse>;
+    /// Posts a JSON body to the given URL.
     async fn post_json(&self, url: &Url, body: &serde_json::Value) -> anyhow::Result<JsonResponse>;
 }
 
@@ -191,6 +197,7 @@ pub(crate) fn redirect_allowed(from: &Url, to: &Url) -> bool {
 }
 
 impl ReqwestHttp {
+    /// Creates an HTTP client with the production timeouts and redirect policy.
     pub fn new() -> anyhow::Result<Self> {
         let base = || {
             reqwest::Client::builder()
@@ -322,12 +329,17 @@ pub type RecordedForm = (String, Vec<(String, String)>, Option<(String, String)>
 
 #[derive(Default)]
 #[allow(clippy::type_complexity)]
+/// A scripted OAuthHttp for tests keyed by exact URL.
 pub struct FakeHttp {
+    /// Scripted GET responses keyed by URL.
     pub gets: HashMap<String, JsonResponse>,
+    /// Scripted POST responses keyed by URL.
     pub posts: HashMap<String, JsonResponse>,
     /// Scripted answers to [`OAuthHttp::probe_challenge`], keyed by MCP URL.
     pub challenges: HashMap<String, JsonResponse>,
+    /// Recorded form POSTs made through the fake, in order.
     pub recorded_forms: std::sync::Mutex<Vec<RecordedForm>>,
+    /// Recorded JSON POSTs made through the fake, in order.
     pub recorded_json: std::sync::Mutex<Vec<(String, serde_json::Value)>>,
     /// Runs while a `post_form` is "in flight", after it has yielded.
     ///
@@ -362,6 +374,7 @@ impl FakeHttp {
             .map(|(_, _, basic)| basic.clone())
     }
 
+    /// Builds a JSON response with the given status and body.
     pub fn json(status: u16, value: serde_json::Value) -> JsonResponse {
         JsonResponse {
             status,
@@ -371,6 +384,7 @@ impl FakeHttp {
         }
     }
 
+    /// Builds a 404 response with no body.
     pub fn not_found() -> JsonResponse {
         JsonResponse {
             status: 404,
@@ -395,6 +409,7 @@ impl FakeHttp {
         self
     }
 
+    /// Scripts a GET response for the given URL.
     pub fn with_get(mut self, url: &str, resp: JsonResponse) -> Self {
         self.gets.insert(url.to_string(), resp);
         self
@@ -406,6 +421,7 @@ impl FakeHttp {
         self
     }
 
+    /// Scripts a POST response for the given URL.
     pub fn with_post(mut self, url: &str, resp: JsonResponse) -> Self {
         self.posts.insert(url.to_string(), resp);
         self

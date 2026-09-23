@@ -3,22 +3,33 @@ use crate::common::AuthIdentity;
 /// Audit log entry.
 #[derive(Debug, Clone)]
 pub struct AuditEntry {
+    /// When the audited action occurred.
     pub timestamp: chrono::DateTime<chrono::Utc>,
+    /// Authenticated identity, if any.
     pub identity: Option<AuthIdentity>,
+    /// Action that was attempted.
     pub action: String,
+    /// Resource the action targeted.
     pub resource: String,
+    /// Whether the action was allowed, denied, or errored.
     pub outcome: AuditOutcome,
 }
 
+/// Outcome of an audited action.
 #[derive(Debug, Clone)]
+#[non_exhaustive]
 pub enum AuditOutcome {
+    /// Action was allowed.
     Allowed,
+    /// Action was denied with a reason.
     Denied(String),
+    /// Action failed with an error.
     Error(String),
 }
 
 /// Trait for audit logging. Implement for your storage backend.
 pub trait AuditLog: Send + Sync {
+    /// Record an audit entry.
     fn log(&self, entry: AuditEntry);
 }
 

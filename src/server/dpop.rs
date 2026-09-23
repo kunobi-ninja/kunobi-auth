@@ -38,7 +38,7 @@ use jsonwebtoken::{Algorithm, DecodingKey, Validation, decode, decode_header};
 use serde::Deserialize;
 use sha2::{Digest, Sha256};
 
-use crate::common::AuthError;
+use crate::common::{AuthError, secret_eq};
 
 /// Claims a DPoP proof must carry per RFC 9449 §4.2.
 #[derive(Debug, Clone, Deserialize)]
@@ -201,7 +201,9 @@ pub fn verify_dpop_proof(
     if let Some(token) = expected_ath_for {
         let want = ath_for(token);
         match claims.ath.as_deref() {
-            Some(got) if got == want => {}
+            // Constant-time: `ath` binds a token value an attacker may probe
+            // byte-by-byte.
+            Some(got) if secret_eq(got, &want) => {}
             Some(other) => {
                 return Err(AuthError::Unauthorized(format!(
                     "DPoP ath mismatch: proof says {other:?}, expected {want:?}"
@@ -215,10 +217,11 @@ pub fn verify_dpop_proof(
         }
     }
 
-    // Step 7: thumbprint binding (cnf.jkt).
+    // Step 7: thumbprint binding (cnf.jkt). Constant-time for the same
+    // reason as `ath` above.
     let computed_jkt = jkt_thumbprint(&jwk)?;
     if let Some(expected) = expected_jkt
-        && computed_jkt != expected
+        && !secret_eq(&computed_jkt, expected)
     {
         return Err(AuthError::Unauthorized(format!(
             "DPoP jkt mismatch: proof key thumbprint {computed_jkt:?}, \

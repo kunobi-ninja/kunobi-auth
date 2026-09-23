@@ -21,11 +21,13 @@ pub const GITHUB_ACTIONS_ISSUER: &str = "https://token.actions.githubusercontent
 
 /// Who a validated workload token belongs to.
 #[derive(Debug, Clone, PartialEq, Eq)]
+#[non_exhaustive]
 pub enum Workload {
     /// A GitHub Actions job.
     GitHub {
         /// `owner/name`.
         repository: String,
+        /// Repository owner.
         owner: String,
         /// The ref the job runs on, e.g. `refs/heads/main` or
         /// `refs/pull/42/merge`.
@@ -39,14 +41,18 @@ pub enum Workload {
     GitLab {
         /// `group/project`.
         project: String,
+        /// Group/namespace path.
         namespace: String,
+        /// The ref the job runs on, e.g. `main`.
         git_ref: String,
         /// The pipeline source, e.g. `push` or `merge_request_event`.
         pipeline_source: String,
     },
     /// A Kubernetes pod's projected service-account token.
     Kubernetes {
+        /// Pod namespace.
         namespace: String,
+        /// Service-account name.
         service_account: String,
     },
 }

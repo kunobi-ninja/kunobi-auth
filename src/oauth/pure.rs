@@ -28,13 +28,18 @@ pub use crate::oauth::pkce::Pkce;
 /// Everything needed to build one authorization request.
 #[derive(Debug, Clone)]
 pub struct AuthorizeRequest {
+    /// The provider's authorization endpoint.
     pub authorize_url: String,
+    /// The client identifier sent on the authorization request.
     pub client_id: String,
+    /// The redirect URI sent on the authorization request.
     pub redirect_uri: String,
+    /// The scopes requested on the authorization request.
     pub scopes: Vec<String>,
     /// Random, single-use, and the only thing tying a callback back to the
     /// account whose flow started it.
     pub state: String,
+    /// The PKCE challenge sent on the authorization request.
     pub challenge: String,
 }
 
@@ -61,7 +66,9 @@ impl AuthorizeRequest {
 /// What came back on the redirect.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Callback {
+    /// The authorization code issued by the provider.
     pub code: String,
+    /// The state value echoed back with the code.
     pub state: String,
 }
 
@@ -84,13 +91,20 @@ impl std::fmt::Debug for Tokens {
 pub enum CallbackError {
     /// The provider reported a failure instead of issuing a code.
     Denied {
+        /// The error code the provider reported.
         error: String,
+        /// The provider's description of the failure, when given.
         description: Option<String>,
     },
     /// `state` did not match the flow in progress. Treated as hostile, not as a
     /// mistake: it is the CSRF guard, and on a shared redirect URI it is also
     /// what keeps one account's callback from completing another's flow.
-    StateMismatch { expected: String, received: String },
+    StateMismatch {
+        /// The state value the flow started with.
+        expected: String,
+        /// The state value the callback carried.
+        received: String,
+    },
     /// No `code` and no `error` — not a callback from this flow.
     Malformed,
 }
@@ -191,10 +205,12 @@ fn pairs(fields: &[(&str, &str)]) -> Vec<(String, String)> {
 /// A token pair as the provider issued it.
 #[derive(Clone, PartialEq, Eq)]
 pub struct Tokens {
+    /// The bearer token to present to the resource.
     pub access_token: String,
     /// X rotates this on every use, so the value here supersedes whatever was
     /// stored — and must be persisted before the old one is discarded.
     pub refresh_token: Option<String>,
+    /// Lifetime of the access token in seconds, when given.
     pub expires_in: Option<u64>,
     /// Scopes actually granted, which can be narrower than those requested when
     /// the account holder declines individually.
@@ -206,7 +222,9 @@ pub struct Tokens {
 pub enum TokenError {
     /// The provider returned an OAuth error object.
     Provider {
+        /// The error code the provider reported.
         error: String,
+        /// The provider's description of the failure, when given.
         description: Option<String>,
     },
     /// Valid JSON, but not a token response.

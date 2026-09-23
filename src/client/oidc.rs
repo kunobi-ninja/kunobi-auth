@@ -20,7 +20,7 @@ use std::collections::HashMap;
 use std::time::{Duration, Instant};
 #[cfg(feature = "browser-login-core")]
 use tokio::sync::oneshot;
-use tracing::{info, warn};
+use tracing::info;
 
 use super::store::StoredToken;
 
@@ -211,10 +211,8 @@ pub async fn browser_login(
 
     let claim_issuer = claims.issuer().to_string();
     if claim_issuer != issuer {
-        warn!(
-            expected = %issuer,
-            actual = %claim_issuer,
-            "ID token issuer differs from configured issuer (using validated claim)"
+        anyhow::bail!(
+            "ID token issuer mismatch: configured {issuer}, token carries {claim_issuer}"
         );
     }
 
@@ -272,6 +270,11 @@ pub async fn refresh(
         .context("Refreshed ID token validation failed")?;
 
     let claim_issuer = claims.issuer().to_string();
+    if claim_issuer != issuer {
+        anyhow::bail!(
+            "refreshed ID token issuer mismatch: configured {issuer}, token carries {claim_issuer}"
+        );
+    }
     let id_token_str = id_token.to_string();
     let new_refresh = response.refresh_token().map(|t| t.secret().clone());
     let expires_at = Some(claims.expiration().timestamp());
@@ -304,6 +307,7 @@ struct RevocationDiscovery {
 /// What kind of token we're acting on (RFC 7009/7662 `token_type_hint`).
 /// Most IdPs accept either hint and figure it out; some require it.
 #[derive(Debug, Clone, Copy)]
+#[non_exhaustive]
 pub enum TokenKind {
     /// `access_token` -- the bearer the API consumes.
     Access,
@@ -349,9 +353,13 @@ pub async fn revoke(issuer: &str, client_id: &str, token: &str, kind: TokenKind)
     if !status.is_success() {
         // RFC 7009 §2.2: 200 OK is the only success code. Some IdPs return
         // 200 even for unknown tokens (intentionally indistinguishable), so
-        // any non-2xx is a real error.
-        let body = resp.text().await.unwrap_or_default();
-        anyhow::bail!("revocation endpoint returned {status}: {body}");
+        // any non-2xx is a real error. The body is capped + truncated: it is
+        // untrusted IdP input, not diagnosis-quality text.
+        let body = capped_text(resp, "revocation").await.unwrap_or_default();
+        anyhow::bail!(
+            "revocation endpoint returned {status}: {}",
+            truncate_body(&body)
+        );
     }
     info!(issuer = %issuer, kind = ?kind, "token revoked at IdP");
     Ok(())
@@ -416,11 +424,15 @@ pub async fn introspect(
         .context("introspection request failed")?;
 
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    let text = capped_text(resp, "introspection").await.unwrap_or_default();
     if !status.is_success() {
-        anyhow::bail!("introspection endpoint returned {status}: {text}");
+        anyhow::bail!(
+            "introspection endpoint returned {status}: {}",
+            truncate_body(&text)
+        );
     }
-    serde_json::from_str(&text).with_context(|| format!("bad introspection JSON: {text}"))
+    serde_json::from_str(&text)
+        .with_context(|| format!("bad introspection JSON: {}", truncate_body(&text)))
 }
 
 async fn revocation_endpoint(issuer: &str) -> Result<Option<String>> {
@@ -445,10 +457,7 @@ async fn fetch_revocation_disco(issuer: &str) -> Result<RevocationDiscovery> {
     if !resp.status().is_success() {
         anyhow::bail!("OIDC discovery {well_known} returned {}", resp.status());
     }
-    let doc: RevocationDiscovery = resp
-        .json()
-        .await
-        .with_context(|| format!("parsing {well_known}"))?;
+    let doc: RevocationDiscovery = capped_json(resp, &format!("parsing {well_known}")).await?;
     ensure_discovery_issuer_matches(issuer, &doc.issuer)?;
     Ok(doc)
 }
@@ -460,6 +469,59 @@ fn build_basic_http() -> Result<reqwest::Client> {
         .redirect(reqwest::redirect::Policy::none())
         .build()
         .context("build http client")
+}
+
+/// Hard cap on OIDC endpoint response bodies (discovery, token, revocation,
+/// introspection). The endpoint is operator-configured, but a compromised or
+/// misbehaving IdP must not make us buffer an unbounded body. 1 MiB matches
+/// the JWKS cap and comfortably fits any realistic OAuth2 payload.
+const MAX_OIDC_RESPONSE_BYTES: usize = 1024 * 1024;
+
+/// Read a response body with [`MAX_OIDC_RESPONSE_BYTES`] enforced, checking
+/// `Content-Length` up front so an absurd length fails before buffering.
+async fn capped_body(resp: reqwest::Response, what: &str) -> Result<Vec<u8>> {
+    if let Some(len) = resp.content_length()
+        && len > MAX_OIDC_RESPONSE_BYTES as u64
+    {
+        anyhow::bail!("{what} response exceeds the {MAX_OIDC_RESPONSE_BYTES}-byte limit");
+    }
+    let bytes = resp
+        .bytes()
+        .await
+        .with_context(|| format!("reading {what} response body"))?;
+    if bytes.len() > MAX_OIDC_RESPONSE_BYTES {
+        anyhow::bail!("{what} response exceeds the {MAX_OIDC_RESPONSE_BYTES}-byte limit");
+    }
+    Ok(bytes.to_vec())
+}
+
+/// [`capped_body`] decoded lossily to text (for error paths and JSON parsing).
+async fn capped_text(resp: reqwest::Response, what: &str) -> Result<String> {
+    Ok(String::from_utf8_lossy(&capped_body(resp, what).await?).into_owned())
+}
+
+/// [`capped_body`] parsed as JSON.
+async fn capped_json<T>(resp: reqwest::Response, what: &str) -> Result<T>
+where
+    T: for<'de> serde::Deserialize<'de>,
+{
+    let bytes = capped_body(resp, what).await?;
+    serde_json::from_slice(&bytes).with_context(|| format!("parsing {what} response as JSON"))
+}
+
+/// Truncate IdP-supplied text embedded in error strings: the full body is
+/// untrusted input and unbounded; 500 chars is plenty for diagnosis.
+fn truncate_body(text: &str) -> String {
+    const LIMIT: usize = 500;
+    if text.len() <= LIMIT {
+        return text.to_string();
+    }
+    // Cut on a char boundary; the body may not be valid UTF-8-clean ASCII.
+    let mut end = LIMIT;
+    while !text.is_char_boundary(end) {
+        end -= 1;
+    }
+    format!("{}…[truncated]", &text[..end])
 }
 // ──────────────────────────────────────────────────────────────────────────────
 // Device Authorization Grant (RFC 8628)
@@ -623,12 +685,17 @@ pub async fn begin_device_flow_with_url(
         .await
         .context("Device-authorization request failed")?;
     let status = resp.status();
-    let text = resp.text().await.unwrap_or_default();
+    let text = capped_text(resp, "device-authorization")
+        .await
+        .unwrap_or_default();
     if !status.is_success() {
-        anyhow::bail!("Device-authorization request returned {status}: {text}");
+        anyhow::bail!(
+            "Device-authorization request returned {status}: {}",
+            truncate_body(&text)
+        );
     }
-    let auth: DeviceAuthorizationResponse =
-        serde_json::from_str(&text).with_context(|| format!("bad device-auth JSON: {text}"))?;
+    let auth: DeviceAuthorizationResponse = serde_json::from_str(&text)
+        .with_context(|| format!("bad device-auth JSON: {}", truncate_body(&text)))?;
 
     // Clamp the server-supplied poll interval. RFC 8628 §3.2 recommends 5s
     // as the default; some IdPs misbehave (return 0, return very large
@@ -691,11 +758,11 @@ impl DeviceFlowHandle {
                 .context("Device token request failed")?;
 
             let status = resp.status();
-            let text = resp.text().await.unwrap_or_default();
+            let text = capped_text(resp, "device-token").await.unwrap_or_default();
 
             if status.is_success() {
                 let body: DeviceTokenResponse = serde_json::from_str(&text)
-                    .with_context(|| format!("bad token JSON: {text}"))?;
+                    .with_context(|| format!("bad token JSON: {}", truncate_body(&text)))?;
                 return finalize_device_token(
                     body,
                     &self.issuer,
@@ -710,7 +777,10 @@ impl DeviceFlowHandle {
             // OAuth2 error codes during the wait.
             let err: DeviceTokenError = match serde_json::from_str(&text) {
                 Ok(e) => e,
-                Err(_) => anyhow::bail!("Device token endpoint returned {status}: {text}"),
+                Err(_) => anyhow::bail!(
+                    "Device token endpoint returned {status}: {}",
+                    truncate_body(&text)
+                ),
             };
             match err.error.as_str() {
                 "authorization_pending" => continue,
@@ -724,7 +794,10 @@ impl DeviceFlowHandle {
                 }
                 "expired_token" => anyhow::bail!("Device code expired before user completed login"),
                 "access_denied" => anyhow::bail!("User denied the device authorization request"),
-                other => anyhow::bail!("Device token endpoint returned error: {other} -- {text}"),
+                other => anyhow::bail!(
+                    "Device token endpoint returned error: {other} -- {}",
+                    truncate_body(&text)
+                ),
             }
         }
     }
@@ -746,7 +819,7 @@ async fn finalize_device_token(
     // flow does not carry a nonce, so we don't check one. The audience defaults
     // to the client_id when none was configured.
     let expected_audience = audience.unwrap_or(client_id).to_string();
-    let jwks = crate::server::JwksManager::new();
+    let jwks = crate::server::JwksManager::try_new()?;
     let claims = jwks
         .validate_jwt(
             &id_token,
@@ -764,10 +837,8 @@ async fn finalize_device_token(
         .unwrap_or(issuer)
         .to_string();
     if claim_issuer != issuer {
-        warn!(
-            expected = %issuer,
-            actual = %claim_issuer,
-            "Device-flow ID token issuer differs from configured issuer (using validated claim)"
+        anyhow::bail!(
+            "device-flow ID token issuer mismatch: configured {issuer}, token carries {claim_issuer}"
         );
     }
 
@@ -803,10 +874,7 @@ async fn fetch_discovery(issuer: &str) -> Result<DiscoveryDoc> {
     if !resp.status().is_success() {
         anyhow::bail!("OIDC discovery {well_known} returned {}", resp.status());
     }
-    let doc: DiscoveryDoc = resp
-        .json()
-        .await
-        .with_context(|| format!("parsing {well_known}"))?;
+    let doc: DiscoveryDoc = capped_json(resp, &format!("parsing {well_known}")).await?;
     ensure_discovery_issuer_matches(issuer, &doc.issuer)?;
     Ok(doc)
 }
@@ -853,5 +921,23 @@ mod tests {
         )
         .unwrap_err();
         assert!(err.to_string().contains("issuer mismatch"));
+    }
+
+    #[test]
+    fn truncate_body_passes_short_text_through() {
+        assert_eq!(truncate_body("bad request"), "bad request");
+        assert_eq!(truncate_body(""), "");
+    }
+
+    #[test]
+    fn truncate_body_caps_long_untrusted_input() {
+        let long = "x".repeat(10_000);
+        let out = truncate_body(&long);
+        assert!(out.len() < long.len());
+        assert!(out.ends_with("[truncated]"));
+        // Boundary-safe on multibyte input.
+        let wide = "é".repeat(10_000);
+        let out = truncate_body(&wide);
+        assert!(out.ends_with("[truncated]"));
     }
 }

@@ -40,8 +40,11 @@ pub struct ProtectedResourceMetadata {
 /// RFC 8414 authorization-server metadata, reduced to the fields we act on.
 #[derive(Debug, Clone, PartialEq, Eq, serde::Deserialize, serde::Serialize)]
 pub struct AuthorizationServerMetadata {
+    /// The issuer identifier the metadata was fetched for.
     pub issuer: String,
+    /// The URL the user is sent to for authorization.
     pub authorization_endpoint: String,
+    /// The URL used to exchange codes and refresh tokens.
     pub token_endpoint: String,
     /// RFC 7591 dynamic client registration. Absent on the "pre-registered
     /// public client" category (X), which is why a pasted `client_id` is a
@@ -49,11 +52,14 @@ pub struct AuthorizationServerMetadata {
     #[serde(default)]
     pub registration_endpoint: Option<String>,
     #[serde(default)]
+    /// Scopes the authorization server advertises.
     pub scopes_supported: Vec<String>,
     #[serde(default)]
+    /// PKCE challenge methods the server advertises.
     pub code_challenge_methods_supported: Vec<String>,
     #[serde(default)]
     #[serde(deserialize_with = "de_token_endpoint_auth")]
+    /// Client authentication methods the token endpoint supports.
     pub token_endpoint_auth_methods_supported: TokenEndpointAuth,
     /// RFC 7009 revocation endpoint, when the server publishes one.
     ///
@@ -64,6 +70,7 @@ pub struct AuthorizationServerMetadata {
     #[serde(default)]
     pub revocation_endpoint: Option<String>,
     #[serde(default)]
+    /// Grant types the authorization server advertises.
     pub grant_types_supported: Vec<String>,
 }
 
@@ -187,6 +194,7 @@ impl AuthorizationServerMetadata {
         }
     }
 
+    /// Whether the server advertises the refresh_token grant.
     pub fn supports_refresh_token(&self) -> bool {
         self.grant_types_supported.is_empty()
             || self

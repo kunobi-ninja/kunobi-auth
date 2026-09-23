@@ -4,29 +4,40 @@ use serde::{Deserialize, Serialize};
 /// The `app` field is generic -- each service adds its own data.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct StatusResponse<T = serde_json::Value> {
+    /// Service version string.
     pub version: String,
+    /// Advertised auth methods and sessions.
     pub auth: AuthStatus,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Service-specific payload.
     pub app: Option<T>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// Auth section of a status response.
 pub struct AuthStatus {
+    /// Auth methods the service accepts.
     pub methods: Vec<AuthMethodInfo>,
     #[serde(default)]
+    /// Active sessions, if the service exposes any.
     pub sessions: Vec<Session>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// One auth method advertised by a service.
 #[serde(rename_all = "camelCase")]
 pub struct AuthMethodInfo {
     #[serde(rename = "type")]
+    /// Method discriminator: `oidc`, `token`, `ssh`, ….
     pub method_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// OIDC issuer, for `oidc` methods.
     pub issuer: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// OAuth2 client ID clients should use.
     pub client_id: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Human-readable method description.
     pub description: Option<String>,
     /// Service audience for SSH signature binding.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -37,12 +48,17 @@ pub struct AuthMethodInfo {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
+/// One session exposed by a service.
 #[serde(rename_all = "camelCase")]
 pub struct Session {
+    /// Auth method the session came from.
     pub method: String,
+    /// Session identity string.
     pub identity: String,
+    /// Resources the session may access.
     pub resources: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Expiry timestamp, if the service reports one.
     pub expires_at: Option<String>,
 }
 
