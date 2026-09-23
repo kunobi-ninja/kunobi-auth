@@ -33,13 +33,13 @@ No Kubernetes dependency. Tested end-to-end against [Dex](https://dexidp.io/) v2
 
 ```toml
 # Server only (no browser deps)
-kunobi-auth = { version = "0.12", default-features = false, features = ["server"] }
+kunobi-auth = { version = "0.13", default-features = false, features = ["server"] }
 
 # MCP server only
-kunobi-auth = { version = "0.12", default-features = false, features = ["mcp-server"] }
+kunobi-auth = { version = "0.13", default-features = false, features = ["mcp-server"] }
 
 # Client only
-kunobi-auth = { version = "0.12", default-features = false, features = ["client"] }
+kunobi-auth = { version = "0.13", default-features = false, features = ["client"] }
 ```
 
 **Crypto backend:** when using `default-features = false`, also enable exactly one
@@ -104,13 +104,34 @@ let client = AuthClient::with_static_token("my-api-token".into())?;
 let token = client.token().await?;
 ```
 
+### Workload tokens (CI jobs and pods)
+
+A CI job or a pod can authenticate with a token its platform issues, so there
+is no secret to distribute:
+
+```rust
+use kunobi_auth::client::workload::workload_token;
+
+let service = "https://kache.example.com";
+if let Some(token) = workload_token(service, service).await? {
+    // send `token.token` as the bearer
+}
+```
+
+The first available source wins: the GitHub Actions ID token (the job needs
+`id-token: write`), a GitLab CI ID token in `KUNOBI_ID_TOKEN`, or a projected
+Kubernetes service-account token read from the file in `KUNOBI_SA_TOKEN_FILE`.
+Tokens go only to HTTPS services or to loopback. Use the service's own URL as
+the audience, so a token cannot be replayed against another service that
+trusts the same issuer.
+
 ### External OAuth access-token grants
 
 Enable `oauth` for a provider API or remote MCP connection that needs OAuth
 **access tokens**:
 
 ```toml
-kunobi-auth = { version = "0.12", default-features = false, features = ["oauth"] }
+kunobi-auth = { version = "0.13", default-features = false, features = ["oauth"] }
 ```
 
 `kunobi_auth::oauth` is separate from `client::AuthClient`. `AuthClient` manages
@@ -214,6 +235,36 @@ let app = Router::new()
     .route("/me", get(me))
     .with_state(auth);
 ```
+
+### Workload identity (GitHub Actions, GitLab CI, Kubernetes)
+
+Presets name the issuer and key URL for each platform. Which workloads to
+trust stays with the service, as a `ClaimRule`:
+
+```rust
+use kunobi_auth::server::{AuthBuilder, AuthnProvider, JwtAuthConfig};
+use kunobi_auth::{ClaimAllowed, ClaimRule, Workload};
+
+let auth = AuthBuilder::new()
+    .jwt(JwtAuthConfig::github_actions("https://kache.example.com"))
+    .build();
+let trusted = ClaimRule::new([
+    ClaimAllowed::any_of("repository_owner", ["my-org"]).ignoring_ascii_case(),
+]);
+
+let identity = auth.authenticate(bearer).await?;
+if identity.workload().is_some() && !trusted.matches(&identity) {
+    // reject: a token from a repository outside the allow-list
+}
+if let Some(Workload::GitHub { repository, .. }) = identity.workload() {
+    // scope what the job may touch to `repository`
+}
+```
+
+`JwtAuthConfig::gitlab_ci(host, audience)` and
+`JwtAuthConfig::kubernetes(issuer, jwks_url, audience)` work the same way.
+A rule matches only when it has at least one clause and every clause holds, so
+an empty rule never grants access.
 
 ### MCP server auth
 

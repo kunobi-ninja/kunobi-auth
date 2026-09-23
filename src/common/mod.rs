@@ -7,8 +7,9 @@ pub mod identity;
 pub mod rules;
 pub mod secret;
 pub mod status;
+pub mod workload;
 
-pub use authz::{ClaimMatch, first_match};
+pub use authz::{ClaimAllowed, ClaimMatch, ClaimRule, first_match, first_rule_match};
 pub use discovery::KunobiAuthDiscovery;
 pub use error::AuthError;
 pub use fail::AuthFailReason;
@@ -16,3 +17,4 @@ pub use identity::AuthIdentity;
 pub use rules::{AuthMethod, OidcAuth, ServiceAccountAuth, TokenAuth};
 pub use secret::secret_eq;
 pub use status::{AuthMethodInfo, AuthStatus, Session, StatusResponse};
+pub use workload::Workload;
