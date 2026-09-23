@@ -36,13 +36,13 @@ No Kubernetes dependency. Tested end-to-end against [Dex](https://dexidp.io/) v2
 
 ```toml
 # Server only (no browser deps)
-kunobi-auth = { version = "0.13", default-features = false, features = ["server"] }
+kunobi-auth = { version = "1.0", default-features = false, features = ["server"] }
 
 # MCP server only
-kunobi-auth = { version = "0.13", default-features = false, features = ["mcp-server"] }
+kunobi-auth = { version = "1.0", default-features = false, features = ["mcp-server"] }
 
 # Client only
-kunobi-auth = { version = "0.13", default-features = false, features = ["client"] }
+kunobi-auth = { version = "1.0", default-features = false, features = ["client"] }
 ```
 
 **Crypto backend:** when using `default-features = false`, also enable exactly one
@@ -134,7 +134,7 @@ Enable `oauth` for a provider API or remote MCP connection that needs OAuth
 **access tokens**:
 
 ```toml
-kunobi-auth = { version = "0.13", default-features = false, features = ["oauth"] }
+kunobi-auth = { version = "1.0", default-features = false, features = ["oauth"] }
 ```
 
 `kunobi_auth::oauth` is separate from `client::AuthClient`. `AuthClient` manages
