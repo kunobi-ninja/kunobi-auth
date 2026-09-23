@@ -7,6 +7,7 @@ pub mod ssh;
 mod store;
 pub mod tofu;
 mod token;
+pub mod workload;
 
 pub use config::ServiceConfig;
 pub use discovery::{discover, discover_unpinned, discover_with_store};

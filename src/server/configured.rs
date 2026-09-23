@@ -164,6 +164,54 @@ impl JwtAuthConfig {
         }
     }
 
+    /// GitHub Actions OIDC ID tokens minted for `audience`. The job requests
+    /// its token with that audience (see `client::workload`); the consumer
+    /// decides which repositories to trust with a
+    /// [`ClaimRule`](crate::ClaimRule) on `repository_owner` or `repository`.
+    /// Registered under [`GITHUB_ACTIONS_PROVIDER`](crate::common::workload::GITHUB_ACTIONS_PROVIDER).
+    pub fn github_actions(audience: impl Into<String>) -> Self {
+        let issuer = crate::common::workload::GITHUB_ACTIONS_ISSUER;
+        // GitHub serves its keys at `/.well-known/jwks`, not `jwks.json`.
+        Self::oidc(
+            crate::common::workload::GITHUB_ACTIONS_PROVIDER,
+            issuer,
+            format!("{issuer}/.well-known/jwks"),
+            vec![audience.into()],
+        )
+    }
+
+    /// GitLab CI ID tokens (`id_tokens:` in `.gitlab-ci.yml`) from the GitLab
+    /// instance at `host` (e.g. `gitlab.com`), minted for `audience`.
+    /// Registered under [`GITLAB_CI_PROVIDER`](crate::common::workload::GITLAB_CI_PROVIDER).
+    pub fn gitlab_ci(host: &str, audience: impl Into<String>) -> Self {
+        let host = host.trim_start_matches("https://").trim_end_matches('/');
+        Self::oidc(
+            crate::common::workload::GITLAB_CI_PROVIDER,
+            format!("https://{host}"),
+            format!("https://{host}/oauth/discovery/keys"),
+            vec![audience.into()],
+        )
+    }
+
+    /// Projected Kubernetes service-account tokens from the cluster whose
+    /// service-account issuer is `issuer`, with keys at `jwks_url`, minted for
+    /// `audience`. Registered under
+    /// [`KUBERNETES_PROVIDER`](crate::common::workload::KUBERNETES_PROVIDER);
+    /// the identity is the token's `sub`,
+    /// `system:serviceaccount:<namespace>:<name>`.
+    pub fn kubernetes(
+        issuer: impl Into<String>,
+        jwks_url: impl Into<String>,
+        audience: impl Into<String>,
+    ) -> Self {
+        Self::oidc(
+            crate::common::workload::KUBERNETES_PROVIDER,
+            issuer,
+            jwks_url,
+            vec![audience.into()],
+        )
+    }
+
     pub fn algorithms(mut self, algorithms: Vec<String>) -> Self {
         self.algorithms = algorithms;
         self
@@ -419,6 +467,43 @@ mod tests {
         assert_eq!(config.audience, vec!["my-project"]);
         assert_eq!(config.algorithms, vec!["RS256"]);
         assert_eq!(config.identity_claim, "sub");
+    }
+
+    #[test]
+    fn workload_presets_name_their_issuer_keys_and_audience() {
+        let github = JwtAuthConfig::github_actions("https://kache.example.com");
+        assert_eq!(github.provider, "github-actions");
+        assert_eq!(github.issuer, "https://token.actions.githubusercontent.com");
+        assert_eq!(
+            github.jwks_url,
+            "https://token.actions.githubusercontent.com/.well-known/jwks"
+        );
+        assert_eq!(github.audience, vec!["https://kache.example.com"]);
+        assert_eq!(github.algorithms, vec!["RS256"]);
+
+        for host in ["gitlab.example.com", "https://gitlab.example.com/"] {
+            let gitlab = JwtAuthConfig::gitlab_ci(host, "kache");
+            assert_eq!(gitlab.provider, "gitlab-ci");
+            assert_eq!(gitlab.issuer, "https://gitlab.example.com");
+            assert_eq!(
+                gitlab.jwks_url,
+                "https://gitlab.example.com/oauth/discovery/keys"
+            );
+            assert_eq!(gitlab.audience, vec!["kache"]);
+        }
+
+        let cluster = JwtAuthConfig::kubernetes(
+            "https://kubernetes.default.svc",
+            "https://kubernetes.default.svc/openid/v1/jwks",
+            "kache",
+        );
+        assert_eq!(cluster.provider, "kubernetes");
+        assert_eq!(cluster.issuer, "https://kubernetes.default.svc");
+        assert_eq!(
+            cluster.jwks_url,
+            "https://kubernetes.default.svc/openid/v1/jwks"
+        );
+        assert_eq!(cluster.audience, vec!["kache"]);
     }
 
     #[tokio::test]
