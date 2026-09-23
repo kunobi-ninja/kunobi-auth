@@ -37,7 +37,9 @@ pub const EXPIRY_SKEW_SECS: i64 = 120;
 /// exactly what would happen.
 #[derive(Clone, PartialEq, Eq)]
 pub struct TokenSet {
+    /// The bearer token to present to the resource.
     pub access_token: String,
+    /// The refresh token used to obtain a new access token.
     pub refresh_token: Option<String>,
     /// Absolute expiry as a Unix timestamp. `None` for a server that returns no
     /// `expires_in`, which is treated as "never proactively refresh" — the 401
@@ -161,16 +163,22 @@ impl KeychainAccounts {
 /// from "the backend itself failed" (`Err`) -- conflating them turns a keychain
 /// outage into a spurious re-authorization prompt.
 pub trait SecretBackend: Send + Sync {
+    /// Reads the secret stored under the given account.
     fn get(&self, account: &str) -> anyhow::Result<Option<String>>;
+    /// Writes the secret stored under the given account.
     fn set(&self, account: &str, value: &str) -> anyhow::Result<()>;
+    /// Removes the secret stored under the given account.
     fn remove(&self, account: &str) -> anyhow::Result<()>;
 }
 
 /// Reads and writes [`TokenSet`]s. A trait so the injector's tests can run
 /// without an OS keychain (headless CI has no Secret Service).
 pub trait TokenStore: Send + Sync {
+    /// Loads the token set stored for the given connection.
     fn load(&self, target_id: &str) -> anyhow::Result<Option<TokenSet>>;
+    /// Saves the token set stored for the given connection.
     fn save(&self, target_id: &str, set: &TokenSet) -> anyhow::Result<()>;
+    /// Clears the token set stored for the given connection.
     fn clear(&self, target_id: &str) -> anyhow::Result<()>;
 }
 
@@ -188,6 +196,7 @@ pub struct KeychainTokenStore {
 }
 
 impl KeychainTokenStore {
+    /// Creates a store over the given backend and account names.
     pub fn new(backend: Arc<dyn SecretBackend>, accounts: KeychainAccounts) -> Self {
         Self { backend, accounts }
     }
@@ -260,9 +269,12 @@ impl TokenStore for KeychainTokenStore {
 /// here -- it lives in its own entry.
 #[derive(serde::Serialize, serde::Deserialize)]
 pub struct StoredAccess {
+    /// The stored access token.
     pub access_token: String,
+    /// Absolute expiry as a Unix timestamp, when known.
     pub expires_at: Option<i64>,
     #[serde(default)]
+    /// Scopes granted with the access token.
     pub scopes: Vec<String>,
 }
 
@@ -283,6 +295,7 @@ pub struct MemoryTokenStore {
 }
 
 impl MemoryTokenStore {
+    /// Creates a store preloaded with one token set.
     pub fn with(target_id: &str, set: TokenSet) -> Self {
         let s = Self::default();
         s.inner.lock().unwrap().insert(target_id.to_string(), set);

@@ -28,6 +28,13 @@ pub const MAX_FUTURE_CLOCK_SKEW: Duration = Duration::from_secs(5);
 
 const NONCE_MAX_LEN: usize = 256;
 const NONCE_TRACKER_MAX_ENTRIES: usize = 4096;
+/// Bound attacker-controlled header fields before any base64 decode or crypto:
+/// fingerprints are `SHA256:<44 base64 chars>` (51), timestamps are epoch or
+/// RFC 3339 (~20–30 chars), and Ed25519 SSHSIG blobs are a few hundred bytes.
+/// Anything larger is rejected before it can burn CPU/memory pre-verify.
+const FINGERPRINT_MAX_LEN: usize = 128;
+const TIMESTAMP_MAX_LEN: usize = 64;
+const SIGNATURE_MAX_LEN: usize = 16 * 1024;
 
 /// Truncate a `"SHA256:..."` fingerprint to a short prefix that is safe to
 /// echo in unauthenticated error responses. The full value is kept in
@@ -50,9 +57,13 @@ fn redact_fingerprint(fp: &str) -> String {
 /// Parsed fields from the `SSH-Signature` HTTP header.
 #[derive(Debug, Clone)]
 pub struct SshSignatureHeader {
+    /// Key fingerprint identifying the signing key.
     pub fingerprint: String,
+    /// Request timestamp the signature was created for.
     pub timestamp: String,
+    /// Unique nonce for replay protection.
     pub nonce: String,
+    /// Raw SSHSIG signature bytes.
     pub signature: Vec<u8>,
 }
 
@@ -98,18 +109,32 @@ pub fn parse_ssh_auth_header(header: &str) -> Result<SshSignatureHeader, AuthErr
     }
 
     Ok(SshSignatureHeader {
-        fingerprint: fingerprint.ok_or_else(|| {
-            AuthError::Unauthorized("missing fingerprint in SSH-Signature header".into())
-        })?,
-        timestamp: timestamp.ok_or_else(|| {
-            AuthError::Unauthorized("missing timestamp in SSH-Signature header".into())
-        })?,
-        nonce: nonce.ok_or_else(|| {
-            AuthError::Unauthorized("missing nonce in SSH-Signature header".into())
-        })?,
-        signature: signature_bytes.ok_or_else(|| {
-            AuthError::Unauthorized("missing signature in SSH-Signature header".into())
-        })?,
+        fingerprint: fingerprint
+            .filter(|v| !v.is_empty() && v.len() <= FINGERPRINT_MAX_LEN)
+            .ok_or_else(|| {
+                AuthError::Unauthorized(
+                    "missing or oversized fingerprint in SSH-Signature header".into(),
+                )
+            })?,
+        timestamp: timestamp
+            .filter(|v| !v.is_empty() && v.len() <= TIMESTAMP_MAX_LEN)
+            .ok_or_else(|| {
+                AuthError::Unauthorized(
+                    "missing or oversized timestamp in SSH-Signature header".into(),
+                )
+            })?,
+        nonce: nonce
+            .filter(|v| !v.is_empty() && v.len() <= NONCE_MAX_LEN)
+            .ok_or_else(|| {
+                AuthError::Unauthorized("missing or oversized nonce in SSH-Signature header".into())
+            })?,
+        signature: signature_bytes
+            .filter(|v| !v.is_empty() && v.len() <= SIGNATURE_MAX_LEN)
+            .ok_or_else(|| {
+                AuthError::Unauthorized(
+                    "missing or oversized signature in SSH-Signature header".into(),
+                )
+            })?,
     })
 }
 
@@ -298,8 +323,11 @@ pub struct ParsedAuthorizedKey {
 /// A compiled SSH provider, ready for efficient signature verification.
 #[derive(Clone, Debug)]
 pub struct CompiledSshProvider {
+    /// Provider name reported in verified identities.
     pub name: String,
+    /// Accepted authorized keys for this provider.
     pub keys: Vec<ParsedAuthorizedKey>,
+    /// Fingerprints that are revoked and must be rejected.
     pub revoked_fingerprints: HashSet<String>,
     /// Template for building an identity; `{fingerprint}` and `{comment}`
     /// are substituted at verification time.
@@ -309,9 +337,13 @@ pub struct CompiledSshProvider {
 /// The verified identity that emerges from a successful SSH signature check.
 #[derive(Clone, Debug)]
 pub struct VerifiedSshIdentity {
+    /// Name of the provider that owns the signing key.
     pub provider_name: String,
+    /// Fingerprint of the key that signed the request.
     pub fingerprint: String,
+    /// Comment from the authorized key entry.
     pub comment: String,
+    /// Identity string built from the provider template.
     pub identity: String,
 }
 
@@ -432,11 +464,12 @@ pub fn verify_ssh_signature(
         }
     }
 
-    // 2. Find key by fingerprint.
+    // 2. Find key by fingerprint (constant-time compare; fingerprints are
+    // attacker-controlled input matched against a small key set).
     let mut found_key: Option<(&ParsedAuthorizedKey, &CompiledSshProvider)> = None;
     'outer: for provider in providers {
         for key in &provider.keys {
-            if key.fingerprint == header.fingerprint {
+            if crate::common::secret_eq(&key.fingerprint, &header.fingerprint) {
                 found_key = Some((key, provider));
                 break 'outer;
             }
@@ -723,14 +756,56 @@ mod tests {
 
     #[test]
     fn test_parse_empty_quoted_value() {
-        // value is exactly `""` (length 2). This satisfies the && chain,
-        // so it slices to empty. Kills `len >= 2` -> `len > 2` (the
-        // mutant would not slice, leaving the literal `""` instead of "").
+        // value is exactly `""` (length 2). `strip_surrounding_quotes` still
+        // slices it to empty (see the unit tests below pinning that chain),
+        // but the header gate now rejects empty fingerprints fail-closed.
         let sig_b64 = B64.encode(b"x");
         let hdr =
             format!(r#"fingerprint="",timestamp="1700000000",nonce="n",signature="{sig_b64}""#);
-        let parsed = parse_ssh_auth_header(&hdr).unwrap();
-        assert_eq!(parsed.fingerprint, "");
+        let err = parse_ssh_auth_header(&hdr).unwrap_err();
+        assert!(err.to_string().contains("fingerprint"), "{err}");
+    }
+
+    #[test]
+    fn test_parse_rejects_oversized_fields() {
+        // Each field is capped before any base64 decode or crypto: an
+        // oversized value must fail even when non-empty (kills `&&` -> `||`
+        // in the length gates, which would otherwise accept it).
+        let big_sig = B64.encode(vec![0u8; 32]);
+        let cases = [
+            (
+                "fingerprint",
+                format!(
+                    r#"fingerprint="{}",timestamp="1700000000",nonce="n",signature="{big_sig}""#,
+                    "x".repeat(129)
+                ),
+            ),
+            (
+                "timestamp",
+                format!(
+                    r#"fingerprint="SHA256:abc",timestamp="{}",nonce="n",signature="{big_sig}""#,
+                    "1".repeat(65)
+                ),
+            ),
+            (
+                "nonce",
+                format!(
+                    r#"fingerprint="SHA256:abc",timestamp="1700000000",nonce="{}",signature="{big_sig}""#,
+                    "n".repeat(257)
+                ),
+            ),
+        ];
+        for (field, hdr) in cases {
+            let err = parse_ssh_auth_header(&hdr).unwrap_err();
+            assert!(err.to_string().contains(field), "{field}: {err}");
+        }
+        // Oversized decoded signature (valid base64, too many bytes).
+        let huge_sig = B64.encode(vec![0u8; 17 * 1024]);
+        let hdr = format!(
+            r#"fingerprint="SHA256:abc",timestamp="1700000000",nonce="n",signature="{huge_sig}""#
+        );
+        let err = parse_ssh_auth_header(&hdr).unwrap_err();
+        assert!(err.to_string().contains("signature"), "{err}");
     }
 
     // Mutation-killer tests for `strip_surrounding_quotes`. Each case

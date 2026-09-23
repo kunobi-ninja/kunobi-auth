@@ -24,37 +24,60 @@ impl RefreshLock {
     /// another process is mid-refresh or mid-browser-login for the same
     /// issuer; when it finishes, its fresh token is in the store for us.
     pub(crate) async fn acquire(issuer: &str) -> Result<Self> {
-        let path = lock_path(issuer)?;
+        let path = lock_path("refresh", issuer)?;
         tokio::task::spawn_blocking(move || {
-            if let Some(parent) = path.parent() {
-                std::fs::create_dir_all(parent)
-                    .with_context(|| format!("Failed to create {}", parent.display()))?;
-            }
-            let file = std::fs::OpenOptions::new()
-                .create(true)
-                .truncate(false)
-                .write(true)
-                .open(&path)
-                .with_context(|| format!("Failed to open refresh lock {}", path.display()))?;
-            tracing::debug!(path = %path.display(), "acquiring refresh lock");
-            file.lock()
-                .with_context(|| format!("Failed to lock {}", path.display()))?;
-            Ok(Self { _file: file })
+            Ok(Self {
+                _file: open_locked(&path)?,
+            })
         })
         .await
         .context("refresh-lock task panicked")?
     }
 }
 
-/// Per-issuer lock file under the same config root as the token store. The
-/// issuer is hashed for the same reason token files are: a stable, safe
+/// Synchronous cross-process advisory lock for sync call sites (e.g. TOFU).
+/// Same release-on-drop semantics as [`RefreshLock`]; blocks the calling
+/// thread until the holder releases.
+pub(crate) struct ProcessLock {
+    _file: std::fs::File,
+}
+
+impl ProcessLock {
+    pub(crate) fn acquire(scope: &str, key: &str) -> Result<Self> {
+        Ok(Self {
+            _file: open_locked(&lock_path(scope, key)?)?,
+        })
+    }
+}
+
+/// Create the parent dir, open (creating) the lock file, and block until the
+/// OS advisory lock is held.
+fn open_locked(path: &std::path::Path) -> Result<std::fs::File> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create {}", parent.display()))?;
+    }
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .truncate(false)
+        .write(true)
+        .open(path)
+        .with_context(|| format!("Failed to open lock {}", path.display()))?;
+    tracing::debug!(path = %path.display(), "acquiring lock");
+    file.lock()
+        .with_context(|| format!("Failed to lock {}", path.display()))?;
+    Ok(file)
+}
+
+/// Per-scope/key lock file under the same config root as the token store. The
+/// key is hashed for the same reason token files are: a stable, safe
 /// filename for arbitrary URLs.
-fn lock_path(issuer: &str) -> Result<PathBuf> {
+fn lock_path(scope: &str, key: &str) -> Result<PathBuf> {
     use sha2::{Digest, Sha256};
-    let digest = Sha256::digest(issuer.as_bytes());
+    let digest = Sha256::digest(key.as_bytes());
     Ok(dirs::config_dir()
         .context("Could not determine config directory")?
         .join("kunobi")
         .join("locks")
-        .join(format!("refresh-{}.lock", hex::encode(digest))))
+        .join(format!("{scope}-{}.lock", hex::encode(digest))))
 }

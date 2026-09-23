@@ -67,7 +67,9 @@ pub struct PendingFlow {
     /// [`GrantRegistry::publish_pending`] — the window in which discovery is
     /// still running and no URL exists yet.
     pub authorization_url: String,
+    /// The redirect URI the flow listens on.
     pub redirect_uri: String,
+    /// Unix time the flow was claimed.
     pub started_at: i64,
 }
 
@@ -103,7 +105,9 @@ pub struct FlowId {
 /// own boundary, so this crate does not learn the shape of anyone's storage.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ReauthFlag {
+    /// Why the connection needs the user to authorize again.
     pub reason: String,
+    /// Unix time the failure was recorded.
     pub recorded_at: i64,
 }
 

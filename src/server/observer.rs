@@ -27,7 +27,10 @@ pub enum AuthEvent<'a> {
     /// A credential was accepted. `identity` carries the resolved provider,
     /// method, and claims (read `identity.provider` / `identity.method` for
     /// success labels).
-    Success { identity: &'a AuthIdentity },
+    Success {
+        /// Resolved identity for the accepted credential.
+        identity: &'a AuthIdentity,
+    },
     /// A credential was rejected, or a provider failed.
     ///
     /// `provider` is the configured provider name when the failure is
@@ -36,7 +39,9 @@ pub enum AuthEvent<'a> {
     /// redaction-safe classification suitable for a metrics label
     /// ([`AuthFailReason::label`]).
     Failure {
+        /// Provider the failure is attributed to, if any.
         provider: Option<&'a str>,
+        /// Bounded classification of the failure reason.
         reason: AuthFailReason,
     },
 }

@@ -28,6 +28,9 @@ No Kubernetes dependency. Tested end-to-end against [Dex](https://dexidp.io/) v2
 | `aws-lc-tls` | yes     | Outbound HTTPS (discovery, JWKS, token endpoint) through reqwest's rustls with its bundled aws-lc-rs provider. Implied by `client`, `browser-login`, `server`, `oauth` (and so `keyring`, `mcp-server`) |
 | `client-core` | no     | `client` without choosing a TLS provider, for builds that keep aws-lc-rs out (e.g. ring-only). HTTPS still works: install a rustls `CryptoProvider` before building any HTTP client (`AuthClient`, discovery, refresh) |
 | `browser-login-core` | no | `browser-login` without choosing a TLS provider; see `client-core` |
+| `server-core` | no | Marker for the axum-free server core (`JwksManager`, DPoP, SSH verification, audit log) — always compiled, needs no feature. Implied by `server` |
+| `oauth-core` | no | `oauth` without choosing a TLS provider; see `client-core` |
+| `keyring` | no | OS keychain-backed token storage (macOS Keychain / Windows Credential Manager) via `AuthClient::new_with_keyring`. Implies `client-core` |
 
 **Upgrading from 0.11:** outbound HTTPS now needs a rustls provider. Every feature that makes HTTP calls (`client`, `browser-login`, `server`, `oauth`, and so `keyring`, `mcp-server`) implies `aws-lc-tls`, which supplies one, so those builds are unchanged. A build with `default-features = false` and none of them (for example only `rust_crypto`) that uses `JwksManager` directly must now add `aws-lc-tls` or install a rustls provider itself; otherwise reqwest panics when the client is built.
 
@@ -44,14 +47,14 @@ kunobi-auth = { version = "0.13", default-features = false, features = ["client"
 
 **Crypto backend:** when using `default-features = false`, also enable exactly one
 of `rust_crypto` / `aws_lc_rs`. Cargo unifies features across the whole dependency
-graph, and jsonwebtoken 10 panics at the first JWT operation if both backends end
+graph, and jsonwebtoken 11 panics at the first JWT operation if both backends end
 up enabled and no provider was installed; `kunobi-auth` installs the backend you
 select here on first use (call `kunobi_auth::ensure_crypto_provider()` or
 jsonwebtoken's `CryptoProvider::install_default()` yourself to override).
 
 The `oauth` feature does not use JWT validation or require a JWT crypto backend.
 
-Install from [crates.io](https://crates.io/crates/kunobi-auth). See the [latest release](https://github.com/kunobi-ninja/kunobi-auth/releases) for release notes.
+Install from [crates.io](https://crates.io/crates/kunobi-auth). Release notes live on [GitHub Releases](https://github.com/kunobi-ninja/kunobi-auth/releases) — that page is canonical; this repo keeps no CHANGELOG file.
 
 ## Client usage
 
@@ -492,7 +495,7 @@ Clients fetch auth configuration from `GET {endpoint}/v1/status`:
 
 ```json
 {
-  "version": "0.5.0",
+  "version": "0.13.0",
   "auth": {
     "methods": [
       { "type": "oidc", "issuer": "https://auth.kunobi.ninja", "clientId": "cli" },
@@ -534,8 +537,8 @@ temporary ignore for the transitive RSA Marvin advisory.
 ### Coverage
 
 The crate uses [`cargo-tarpaulin`](https://github.com/xd009642/tarpaulin)
-for Rust coverage. CI runs the same command with a conservative initial
-`50%` line-coverage floor and uploads `coverage/tarpaulin-report.json`
+for Rust coverage. CI runs the same command with a `60%` line-coverage floor
+(currently ~71%) and uploads `coverage/tarpaulin-report.json`
 as a workflow artifact.
 
 ```sh

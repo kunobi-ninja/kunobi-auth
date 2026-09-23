@@ -6,9 +6,12 @@
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 #[serde(rename_all = "camelCase")]
 pub struct KunobiAuthDiscovery {
+    /// OIDC issuer URL the client trusts.
     pub issuer: String,
+    /// OAuth2 client ID the service expects.
     pub client_id: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
+    /// Expected audience, when the service pins one.
     pub audience: Option<String>,
 }
 

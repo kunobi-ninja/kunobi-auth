@@ -3,15 +3,24 @@ use axum::http::StatusCode;
 #[cfg(feature = "server")]
 use axum::response::{IntoResponse, Response};
 
-#[derive(Debug, thiserror::Error)]
+/// Top-level authentication error.
+///
+/// `#[non_exhaustive]`: match with a wildcard arm so new variants don't break
+/// you. Construct `Internal` via [`AuthError::internal`] /
+/// [`AuthError::internal_with_source`], not the struct literal.
+///
+/// `Display`/`Error` are hand-written (not `thiserror`-derived): derives
+/// generate exhaustive matches, which don't compose with `#[non_exhaustive]`.
+#[derive(Debug)]
+#[non_exhaustive]
 pub enum AuthError {
-    #[error("Unauthorized: {0}")]
+    /// Caller credential problem (401): bad, expired, or missing token.
     Unauthorized(String),
 
-    #[error("Forbidden: {0}")]
+    /// Valid identity, insufficient permission (403).
     Forbidden(String),
 
-    #[error("Rate limited: {0}")]
+    /// Slow down (429).
     RateLimited(String),
 
     /// A server-side fault (500-class). `message` is a static, redaction-safe
@@ -20,12 +29,34 @@ pub enum AuthError {
     /// is NEVER serialized into the HTTP response body. Construct with
     /// [`AuthError::internal`] / [`AuthError::internal_with_source`] rather than
     /// the struct literal.
-    #[error("Internal auth error: {message}")]
     Internal {
+        /// Static, redaction-safe summary. The only part surfaced to clients.
         message: String,
-        #[source]
+        /// Underlying cause, kept server-side for logs. Never serialized.
         source: Option<Box<dyn std::error::Error + Send + Sync + 'static>>,
     },
+}
+
+impl std::fmt::Display for AuthError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            AuthError::Unauthorized(msg) => write!(f, "Unauthorized: {msg}"),
+            AuthError::Forbidden(msg) => write!(f, "Forbidden: {msg}"),
+            AuthError::RateLimited(msg) => write!(f, "Rate limited: {msg}"),
+            AuthError::Internal { message, .. } => write!(f, "Internal auth error: {message}"),
+        }
+    }
+}
+
+impl std::error::Error for AuthError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            AuthError::Internal { source, .. } => source
+                .as_ref()
+                .map(|s| s.as_ref() as &(dyn std::error::Error + 'static)),
+            _ => None,
+        }
+    }
 }
 
 impl AuthError {
@@ -65,7 +96,9 @@ impl AuthError {
         match self {
             AuthError::Unauthorized(_) => Some("invalid_token"),
             AuthError::Forbidden(_) => Some("insufficient_scope"),
-            AuthError::RateLimited(_) | AuthError::Internal { .. } => None,
+            // RateLimited / Internal carry no challenge; future variants
+            // default to none (fail-closed: no challenge emitted).
+            _ => None,
         }
     }
 }

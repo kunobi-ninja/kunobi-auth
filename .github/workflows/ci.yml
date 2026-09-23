@@ -77,7 +77,7 @@ jobs:
         run: cargo package --locked --no-default-features --features oauth
 
       - name: Coverage
-        run: cargo tarpaulin --engine llvm --all-features --workspace --out Json --output-dir coverage --fail-under 50
+        run: cargo tarpaulin --engine llvm --all-features --workspace --out Json --output-dir coverage --fail-under 60
 
       - name: Upload coverage report
         if: always()

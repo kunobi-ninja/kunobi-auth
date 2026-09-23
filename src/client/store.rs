@@ -79,6 +79,7 @@ pub struct TokenStore {
 }
 
 impl TokenStore {
+    /// Create a token store under the user config directory.
     pub fn new() -> Result<Self> {
         let dir = dirs::config_dir()
             .ok_or_else(|| anyhow::anyhow!("Could not determine config directory"))?

@@ -52,6 +52,7 @@ pub struct ProtectedResourceMetadata {
 }
 
 impl ProtectedResourceMetadata {
+    /// Create metadata with default bearer methods and no optional fields.
     pub fn new<I, S>(resource: impl Into<String>, authorization_servers: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -68,6 +69,7 @@ impl ProtectedResourceMetadata {
         }
     }
 
+    /// Set the scopes this resource server understands.
     pub fn scopes_supported<I, S>(mut self, scopes: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -77,16 +79,19 @@ impl ProtectedResourceMetadata {
         self
     }
 
+    /// Set the human-readable resource name.
     pub fn resource_name(mut self, name: impl Into<String>) -> Self {
         self.resource_name = Some(name.into());
         self
     }
 
+    /// Set the URL for resource documentation.
     pub fn resource_documentation(mut self, url: impl Into<String>) -> Self {
         self.resource_documentation = Some(url.into());
         self
     }
 
+    /// Set the accepted JWT signing algorithms.
     pub fn signing_algorithms<I, S>(mut self, algorithms: I) -> Self
     where
         I: IntoIterator<Item = S>,
@@ -107,12 +112,22 @@ pub struct McpServerAuthConfig {
     realm: Option<String>,
 }
 
+/// Configuration errors for MCP server auth setup.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+#[non_exhaustive]
 pub enum McpServerAuthConfigError {
+    /// A required field was empty.
     #[error("{field} must not be empty")]
-    Empty { field: &'static str },
+    Empty {
+        /// Name of the empty field.
+        field: &'static str,
+    },
+    /// Value was not an absolute URI.
     #[error("{field} must be an absolute URI")]
-    InvalidUri { field: &'static str },
+    InvalidUri {
+        /// Name of the invalid field.
+        field: &'static str,
+    },
 }
 
 impl McpServerAuthConfig {
@@ -144,27 +159,33 @@ impl McpServerAuthConfig {
         })
     }
 
+    /// Set the realm reported in `WWW-Authenticate` challenges.
     pub fn realm(mut self, realm: impl Into<String>) -> Self {
         self.realm = Some(realm.into());
         self
     }
 
+    /// Return the protected resource metadata.
     pub fn metadata(&self) -> &ProtectedResourceMetadata {
         &self.metadata
     }
 
+    /// Return the metadata URL advertised in challenges.
     pub fn metadata_url(&self) -> &str {
         &self.metadata_url
     }
 
+    /// Build the router serving the metadata document.
     pub fn metadata_router(&self) -> Router {
         protected_resource_metadata_router_at(&self.metadata_path, self.metadata.clone())
     }
 
+    /// Build the bearer auth layer for this config.
     pub fn layer<P>(&self, provider: P) -> McpAuthLayer<P> {
         McpAuthLayer::new(provider, self.challenge())
     }
 
+    /// Build the `WWW-Authenticate` challenge for this config.
     pub fn challenge(&self) -> McpWwwAuthenticate {
         McpWwwAuthenticate {
             metadata_url: Arc::from(self.metadata_url.clone()),
@@ -259,6 +280,7 @@ pub struct McpWwwAuthenticate {
 }
 
 impl McpWwwAuthenticate {
+    /// Create a challenge advertising the given metadata URL.
     pub fn new(metadata_url: impl Into<String>) -> Result<Self, McpServerAuthConfigError> {
         let metadata_url = metadata_url.into();
         require_absolute_uri("metadata_url", &metadata_url)?;
@@ -268,11 +290,13 @@ impl McpWwwAuthenticate {
         })
     }
 
+    /// Set the realm reported in the challenge.
     pub fn realm(mut self, realm: impl Into<String>) -> Self {
         self.realm = Some(Arc::from(realm.into()));
         self
     }
 
+    /// Render the `WWW-Authenticate` header value.
     pub fn header_value(&self, error: Option<&str>, error_description: Option<&str>) -> String {
         let mut value = "Bearer".to_string();
         let mut first = true;
@@ -299,6 +323,7 @@ impl McpWwwAuthenticate {
         value
     }
 
+    /// Build a 401 response carrying the challenge header.
     pub fn unauthorized_response(
         &self,
         error: Option<&str>,
@@ -343,6 +368,7 @@ fn push_auth_param(value: &mut String, first: &mut bool, name: &str, param_value
     value.push('"');
 }
 
+/// Tower layer enforcing MCP bearer auth with `WWW-Authenticate` challenges.
 #[derive(Clone, Debug)]
 pub struct McpAuthLayer<P> {
     provider: P,
@@ -350,6 +376,7 @@ pub struct McpAuthLayer<P> {
 }
 
 impl<P> McpAuthLayer<P> {
+    /// Create a layer from a provider and a challenge.
     pub fn new(provider: P, challenge: McpWwwAuthenticate) -> Self {
         Self {
             provider,
@@ -373,6 +400,7 @@ where
     }
 }
 
+/// Tower service enforcing MCP bearer auth around an inner service.
 #[derive(Clone)]
 pub struct McpAuthService<S, P> {
     inner: S,

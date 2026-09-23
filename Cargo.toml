@@ -20,7 +20,7 @@ default = ["client", "browser-login", "server", "rust_crypto", "aws-lc-tls"]
 # calls implies it, except the `-core` variants.
 aws-lc-tls = ["reqwest/rustls"]
 # jsonwebtoken crypto backend selection. Cargo unifies features across the
-# whole dependency graph, and jsonwebtoken 10 panics on first signer/verifier
+# whole dependency graph, and jsonwebtoken 11 panics on first signer/verifier
 # use when BOTH backends end up enabled (it cannot auto-select a provider).
 # Consumers that already link aws-lc-rs (e.g. via rustls/surrealdb) should
 # disable default features and enable `aws_lc_rs` instead. If neither backend
@@ -45,16 +45,20 @@ browser-login = ["browser-login-core", "client"]
 browser-login-core = ["client-core", "dep:open", "dep:axum"]
 # Server-side axum integration: AuthLayer/tower, extractors, ConfiguredAuth,
 # and `AuthError: IntoResponse`. The JWKS/JWT validation core (JwksManager),
-# DPoP, SSH-signature verification, and audit log are available WITHOUT this.
-server = ["dep:axum", "dep:tower", "dep:http", "aws-lc-tls"]
+# DPoP, SSH-signature verification, and audit log are available WITHOUT this
+# (see `server-core`, which is always compiled and needs no feature).
+server-core = []
+server = ["server-core", "dep:axum", "dep:tower", "dep:http", "aws-lc-tls"]
 mcp-server = ["server"]
 # Provider-agnostic access-token grants for external APIs and MCP servers.
 # Hosts own browser/UI and keychain integration; no OIDC session or Axum deps.
-oauth = ["dep:async-trait", "dep:getrandom", "dep:url", "dep:zeroize", "tokio/io-util", "aws-lc-tls"]
+oauth-core = ["dep:async-trait", "dep:getrandom", "dep:url", "dep:zeroize", "tokio/io-util"]
+# `oauth` with a TLS provider; see `client-core` for the `-core` rationale.
+oauth = ["oauth-core", "aws-lc-tls"]
 # OS keychain-backed token storage (macOS Keychain / Windows Credential
 # Manager). Linux Secret Service can be added later via the keyring crate's
 # `sync-secret-service` feature.
-keyring = ["client", "dep:keyring"]
+keyring = ["client-core", "dep:keyring"]
 
 [dependencies]
 # HTTP / Web

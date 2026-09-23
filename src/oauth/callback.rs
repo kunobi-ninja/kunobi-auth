@@ -55,7 +55,9 @@ pub struct CallbackListener {
 /// What the authorization server sent back.
 #[derive(Clone, PartialEq, Eq)]
 pub struct CallbackResult {
+    /// The authorization code to redeem at the token endpoint.
     pub code: String,
+    /// The state value echoed back with the code.
     pub state: String,
 }
 
@@ -109,6 +111,7 @@ impl CallbackListener {
         &self.redirect_uri
     }
 
+    /// The local port the listener is bound to.
     pub fn port(&self) -> u16 {
         self.listener
             .local_addr()

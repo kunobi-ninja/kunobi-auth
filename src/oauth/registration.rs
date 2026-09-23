@@ -26,14 +26,19 @@ use crate::oauth::http_seam::OAuthHttp;
 #[derive(Clone, PartialEq, Eq)]
 pub enum ClientIdentity {
     /// Obtained from the server's `registration_endpoint`.
-    Registered { client_id: String },
+    Registered {
+        /// The client identifier issued by the server.
+        client_id: String,
+    },
     /// Supplied by the user, from an app they registered themselves.
     ///
     /// Carries the exact redirect URI they registered. That URI is a promise to
     /// the authorization server: its port cannot be renegotiated, which is why
     /// [`crate::oauth::callback`] refuses to fall back to a random port for this case.
     Pasted {
+        /// The client identifier the user pasted from their own app.
         client_id: String,
+        /// The redirect URI the user registered for the app.
         redirect_uri: String,
     },
     /// Supplied by the user, from an app they registered themselves, whose
@@ -52,13 +57,17 @@ pub enum ClientIdentity {
     /// non-confidential. Either way the blast radius is the user's own
     /// registration, which is why this is offered rather than refused.
     PastedConfidential {
+        /// The client identifier the user pasted from their own app.
         client_id: String,
+        /// The redirect URI the user registered for the app.
         redirect_uri: String,
+        /// The client secret the user pasted from their own app.
         client_secret: String,
     },
 }
 
 impl ClientIdentity {
+    /// Returns the client identifier for this identity.
     pub fn client_id(&self) -> &str {
         match self {
             Self::Registered { client_id }

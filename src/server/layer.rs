@@ -152,20 +152,25 @@ where
             let token = extract_bearer(&req);
 
             match (token, mode) {
-                (Some(t), _) => match provider.authenticate(t).await {
+                (Ok(Some(t)), _) => match provider.authenticate(t).await {
                     Ok(identity) => {
                         req.extensions_mut().insert(identity);
                     }
                     Err(e) => return Ok(e.into_response()),
                 },
-                (None, Mode::Required) => {
+                (Ok(None), Mode::Required) => {
                     return Ok(
                         AuthError::Unauthorized("Missing Authorization header".into())
                             .into_response(),
                     );
                 }
-                (None, Mode::Optional) => {
+                (Ok(None), Mode::Optional) => {
                     // No header, optional mode: pass through with no identity.
+                }
+                (Err(e), _) => {
+                    // Present-but-malformed header: 401 in both modes, never a
+                    // silent downgrade to anonymous.
+                    return Ok(e.into_response());
                 }
             }
 
@@ -178,18 +183,22 @@ where
 /// for the reasoning -- multiple `Authorization` headers are forbidden by
 /// RFC 7230 §3.2.2; we don't try to merge them.
 ///
+/// Returns `Ok(None)` only when no header is present. A present-but-malformed
+/// header (wrong scheme, undecodable bytes) is `Err` so optional mode can 401
+/// instead of silently downgrading to anonymous.
+///
 /// The `Bearer` scheme is matched case-insensitively per RFC 6750 §2.1.
 /// `header.get(..7)` never panics on a non-char-boundary the way `[..7]` would.
-fn extract_bearer<B>(req: &Request<B>) -> Option<&str> {
-    let header = req
-        .headers()
-        .get("authorization")
-        .and_then(|v| v.to_str().ok())?;
-    let prefix = header.get(..7)?;
-    if prefix.eq_ignore_ascii_case("Bearer ") {
-        Some(&header[7..])
-    } else {
-        None
+fn extract_bearer<B>(req: &Request<B>) -> Result<Option<&str>, AuthError> {
+    let Some(value) = req.headers().get("authorization") else {
+        return Ok(None);
+    };
+    let header = value
+        .to_str()
+        .map_err(|_| AuthError::Unauthorized("Invalid Authorization header encoding".into()))?;
+    match header.get(..7) {
+        Some(prefix) if prefix.eq_ignore_ascii_case("Bearer ") => Ok(Some(&header[7..])),
+        _ => Err(AuthError::Unauthorized("Expected Bearer token".into())),
     }
 }
 
@@ -307,6 +316,24 @@ mod tests {
                 Request::builder()
                     .uri("/me")
                     .header("authorization", "Bearer wrong")
+                    .body(Body::empty())
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(resp.status(), StatusCode::UNAUTHORIZED);
+    }
+
+    #[tokio::test]
+    async fn optional_layer_401_with_non_bearer_scheme() {
+        // Present-but-malformed (non-Bearer) must not silently downgrade to
+        // anonymous.
+        let app = optional_app();
+        let resp = app
+            .oneshot(
+                Request::builder()
+                    .uri("/me")
+                    .header("authorization", "Basic dXNlcjpwYXNz")
                     .body(Body::empty())
                     .unwrap(),
             )
