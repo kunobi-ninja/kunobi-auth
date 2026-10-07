@@ -34,7 +34,7 @@ jobs:
 
       # Installs Rust 1.94.1 from .mise.toml so publish builds match CI.
       - name: Install mise tools
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@v5
         with:
           experimental: true
           install_args: rust@1.94.1
