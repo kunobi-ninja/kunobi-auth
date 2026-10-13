@@ -182,6 +182,28 @@ pub trait TokenStore: Send + Sync {
     fn clear(&self, target_id: &str) -> anyhow::Result<()>;
 }
 
+/// Awaited token storage for a host RPC or another asynchronous backend.
+///
+/// Use with [`crate::oauth::AsyncRefreshBroker`]. Implementations must yield
+/// while waiting for storage; a synchronous wait for an RPC reply can block
+/// the runtime that needs to deliver it. Missing credentials are `Ok(None)`;
+/// unavailable storage is an error.
+///
+/// A save commits a complete token set. Hosts retaining the shipped two-entry
+/// keychain layout clear access first, update refresh, and write the access
+/// envelope last, as [`KeychainTokenStore`] does. Hosts must fence dispatched
+/// writes against revocation/replacement even if the awaiting future is
+/// cancelled: dropping a future cannot recall an already dispatched RPC.
+#[async_trait::async_trait]
+pub trait AsyncTokenStore: Send + Sync {
+    /// Loads the token set stored for the given connection.
+    async fn load(&self, target_id: &str) -> anyhow::Result<Option<TokenSet>>;
+    /// Saves a complete token set, reporting storage failure without retrying.
+    async fn save(&self, target_id: &str, set: &TokenSet) -> anyhow::Result<()>;
+    /// Clears the token set stored for the given connection.
+    async fn clear(&self, target_id: &str) -> anyhow::Result<()>;
+}
+
 /// The production store: the host's keychain, two entries per connection.
 ///
 /// The access token is stored as a small JSON envelope so `expires_at` and the

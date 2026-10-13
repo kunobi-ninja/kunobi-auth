@@ -15,6 +15,9 @@ pub mod broker;
 pub mod host;
 pub mod registry;
 
-pub use broker::{CredentialBroker, RefreshBroker, RefreshBrokerConfig};
+pub use broker::{
+    AsyncRefreshBroker, AsyncRefreshBrokerConfig, CredentialBroker, RefreshBroker,
+    RefreshBrokerConfig,
+};
 pub use host::{GrantHost, NoDurableState};
 pub use registry::{FlowId, GrantRegistry, PendingFlow, ReauthFlag, next_generation};

@@ -7,7 +7,7 @@ use async_trait::async_trait;
 use crate::oauth::discovery::AuthorizationServerMetadata;
 use crate::oauth::flow;
 use crate::oauth::http_seam::OAuthHttp;
-use crate::oauth::tokens::{TokenSet, TokenStore, now_unix};
+use crate::oauth::tokens::{AsyncTokenStore, TokenSet, TokenStore, now_unix};
 
 use super::host::GrantHost;
 
@@ -134,9 +134,187 @@ impl RefreshBroker {
         }
     }
 
-    fn load(&self) -> anyhow::Result<TokenSet> {
+    fn engine(&self) -> RefreshEngine<'_> {
+        RefreshEngine {
+            host: self.host.as_ref(),
+            connection_id: &self.connection_id,
+            store: Storage::Sync(self.store.as_ref()),
+            http: self.http.as_ref(),
+            metadata: &self.metadata,
+            client_id: &self.client_id,
+            client_secret: self.client_secret.as_deref(),
+            resource: self.resource.as_deref(),
+            scopes: &self.scopes,
+            generation: self.generation,
+            refresh_lock: &self.refresh_lock,
+            commit_lock: &self.commit_lock,
+        }
+    }
+}
+
+#[async_trait]
+impl CredentialBroker for RefreshBroker {
+    async fn access_token(&self, _connection_id: &str) -> anyhow::Result<String> {
+        self.engine().access_token().await
+    }
+
+    async fn refresh(&self, _connection_id: &str) -> anyhow::Result<String> {
+        self.engine().refresh_locked(None).await
+    }
+
+    async fn mark_needs_reauth(&self, _connection_id: &str, reason: &str) {
+        self.engine().mark_needs_reauth(reason).await;
+    }
+}
+
+/// Refresh-aware broker that awaits host-owned token storage.
+///
+/// Uses the same single-flight refresh engine as [`RefreshBroker`]. Supply the
+/// host's per-grant commit lock to serialize refresh with grant completion,
+/// replacement and removal. The store must also fence an RPC that can finish
+/// after its awaiting task has been cancelled.
+pub struct AsyncRefreshBroker {
+    host: Arc<dyn GrantHost>,
+    /// The connection this broker serves, irrespective of a call's argument.
+    pub connection_id: String,
+    /// The awaited store holding this connection's token set.
+    pub store: Arc<dyn AsyncTokenStore>,
+    /// The HTTP seam used for token refresh.
+    pub http: Arc<dyn OAuthHttp>,
+    /// The authorization-server metadata used for refresh.
+    pub metadata: AuthorizationServerMetadata,
+    client_id: String,
+    client_secret: Option<String>,
+    resource: Option<String>,
+    scopes: Vec<String>,
+    generation: u64,
+    refresh_lock: tokio::sync::Mutex<()>,
+    commit_lock: Option<Arc<tokio::sync::Mutex<()>>>,
+}
+
+/// Configuration for [`AsyncRefreshBroker`], with awaited token storage.
+pub struct AsyncRefreshBrokerConfig {
+    /// The grant host notified when re-authorization is needed.
+    pub host: Arc<dyn GrantHost>,
+    /// The connection the broker serves.
+    pub connection_id: String,
+    /// The store holding the connection's token set.
+    pub store: Arc<dyn AsyncTokenStore>,
+    /// The HTTP seam used for token requests.
+    pub http: Arc<dyn OAuthHttp>,
+    /// The authorization-server metadata used for refresh.
+    pub metadata: AuthorizationServerMetadata,
+    /// The client identifier sent on token requests.
+    pub client_id: String,
+    /// The client secret, for a confidential client.
+    pub client_secret: Option<String>,
+    /// The RFC 8707 audience sent on token requests.
+    pub resource: Option<String>,
+    /// The scopes sent on refresh requests.
+    pub scopes: Vec<String>,
+    /// The generation of the live resource this broker belongs to.
+    pub generation: u64,
+    /// The same lock the host takes for removal, replacement and completion.
+    /// With no lock, only removal observed before saving can be detected.
+    pub commit_lock: Option<Arc<tokio::sync::Mutex<()>>>,
+}
+
+impl AsyncRefreshBroker {
+    /// Creates a broker from the given configuration.
+    pub fn new(config: AsyncRefreshBrokerConfig) -> Self {
+        Self {
+            host: config.host,
+            connection_id: config.connection_id,
+            store: config.store,
+            http: config.http,
+            metadata: config.metadata,
+            client_id: config.client_id,
+            client_secret: config.client_secret,
+            resource: config.resource,
+            scopes: config.scopes,
+            generation: config.generation,
+            refresh_lock: tokio::sync::Mutex::new(()),
+            commit_lock: config.commit_lock,
+        }
+    }
+
+    fn engine(&self) -> RefreshEngine<'_> {
+        RefreshEngine {
+            host: self.host.as_ref(),
+            connection_id: &self.connection_id,
+            store: Storage::Async(self.store.as_ref()),
+            http: self.http.as_ref(),
+            metadata: &self.metadata,
+            client_id: &self.client_id,
+            client_secret: self.client_secret.as_deref(),
+            resource: self.resource.as_deref(),
+            scopes: &self.scopes,
+            generation: self.generation,
+            refresh_lock: &self.refresh_lock,
+            commit_lock: &self.commit_lock,
+        }
+    }
+}
+
+#[async_trait]
+impl CredentialBroker for AsyncRefreshBroker {
+    async fn access_token(&self, _connection_id: &str) -> anyhow::Result<String> {
+        self.engine().access_token().await
+    }
+
+    async fn refresh(&self, _connection_id: &str) -> anyhow::Result<String> {
+        self.engine().refresh_locked(None).await
+    }
+
+    async fn mark_needs_reauth(&self, _connection_id: &str, reason: &str) {
+        self.engine().mark_needs_reauth(reason).await;
+    }
+}
+
+// Both public facades borrow their current fields for each operation. This
+// preserves existing callers that replace RefreshBroker's public store/HTTP
+// fields without keeping a second, stale copy inside the engine.
+enum Storage<'a> {
+    Sync(&'a dyn TokenStore),
+    Async(&'a dyn AsyncTokenStore),
+}
+
+impl Storage<'_> {
+    async fn load(&self, id: &str) -> anyhow::Result<Option<TokenSet>> {
+        match self {
+            Self::Sync(store) => store.load(id),
+            Self::Async(store) => store.load(id).await,
+        }
+    }
+
+    async fn save(&self, id: &str, set: &TokenSet) -> anyhow::Result<()> {
+        match self {
+            Self::Sync(store) => store.save(id, set),
+            Self::Async(store) => store.save(id, set).await,
+        }
+    }
+}
+
+struct RefreshEngine<'a> {
+    host: &'a dyn GrantHost,
+    connection_id: &'a str,
+    store: Storage<'a>,
+    http: &'a dyn OAuthHttp,
+    metadata: &'a AuthorizationServerMetadata,
+    client_id: &'a str,
+    client_secret: Option<&'a str>,
+    resource: Option<&'a str>,
+    scopes: &'a [String],
+    generation: u64,
+    refresh_lock: &'a tokio::sync::Mutex<()>,
+    commit_lock: &'a Option<Arc<tokio::sync::Mutex<()>>>,
+}
+
+impl RefreshEngine<'_> {
+    async fn load(&self) -> anyhow::Result<TokenSet> {
         self.store
-            .load(&self.connection_id)?
+            .load(self.connection_id)
+            .await?
             .ok_or_else(|| anyhow::anyhow!("this connection has no stored authorization"))
     }
 
@@ -151,7 +329,7 @@ impl RefreshBroker {
             Some(lock) => Some(lock.clone().lock_owned().await),
             None => None,
         };
-        let current = self.load()?;
+        let current = self.load().await?;
         if let Some(now) = only_if_stale_at
             && !current.is_expired(now)
         {
@@ -164,13 +342,13 @@ impl RefreshBroker {
             )
         })?;
         let next = flow::refresh_token(
-            self.http.as_ref(),
-            &self.metadata,
-            &self.client_id,
-            self.client_secret.as_deref(),
-            self.resource.as_deref(),
+            self.http,
+            self.metadata,
+            self.client_id,
+            self.client_secret,
+            self.resource,
             &refresh,
-            &self.scopes,
+            self.scopes,
         )
         .await?;
 
@@ -178,41 +356,30 @@ impl RefreshBroker {
         // happened while this was on the network must not be undone. It cannot
         // distinguish a SUCCESSOR from the grant this refresh started with —
         // only the host lock above does that.
-        if self.store.load(&self.connection_id)?.is_none() {
+        if self.store.load(self.connection_id).await?.is_none() {
             anyhow::bail!(
                 "this connection's authorization was removed while a refresh was in flight; \
                  the refreshed token was discarded"
             );
         }
 
-        self.store.save(&self.connection_id, &next)?;
+        self.store.save(self.connection_id, &next).await?;
         drop(host_guard);
         Ok(next.access_token)
     }
-}
 
-#[async_trait]
-impl CredentialBroker for RefreshBroker {
-    // The `connection_id` arguments are ignored: this broker serves exactly one
-    // connection, fixed at construction. Honouring a caller's id instead would
-    // let a mismatched call read this connection's token -- which is what
-    // `mark_needs_reauth` used to do, flagging whatever id it was handed.
-    async fn access_token(&self, _connection_id: &str) -> anyhow::Result<String> {
+    async fn access_token(&self) -> anyhow::Result<String> {
         let now = now_unix();
-        let current = self.load()?;
+        let current = self.load().await?;
         if !current.is_expired(now) {
             return Ok(current.access_token);
         }
         self.refresh_locked(Some(now)).await
     }
 
-    async fn refresh(&self, _connection_id: &str) -> anyhow::Result<String> {
-        self.refresh_locked(None).await
-    }
-
-    async fn mark_needs_reauth(&self, _connection_id: &str, reason: &str) {
+    async fn mark_needs_reauth(&self, reason: &str) {
         self.host
-            .mark_needs_reauth(&self.connection_id, self.generation, reason)
+            .mark_needs_reauth(self.connection_id, self.generation, reason)
             .await;
     }
 }
