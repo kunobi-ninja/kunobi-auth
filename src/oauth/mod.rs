@@ -80,13 +80,13 @@ pub use flow::{
     exchange_code, minimal_scopes, refresh_token, resolve_provider,
 };
 pub use grant::{
-    CredentialBroker, FlowId, GrantHost, GrantRegistry, PendingFlow, ReauthFlag, RefreshBroker,
-    RefreshBrokerConfig, next_generation,
+    AsyncRefreshBroker, AsyncRefreshBrokerConfig, CredentialBroker, FlowId, GrantHost,
+    GrantRegistry, PendingFlow, ReauthFlag, RefreshBroker, RefreshBrokerConfig, next_generation,
 };
 pub use http_seam::{JsonResponse, OAuthHttp, ReqwestHttp};
 pub use pkce::{Pkce, constant_time_eq, generate_state, state_matches};
 pub use registration::{ClientIdentity, register_public_client};
 pub use tokens::{
-    EXPIRY_SKEW_SECS, KeychainAccounts, KeychainTokenStore, SecretBackend, TokenSet, TokenStore,
-    now_unix,
+    AsyncTokenStore, EXPIRY_SKEW_SECS, KeychainAccounts, KeychainTokenStore, SecretBackend,
+    TokenSet, TokenStore, now_unix,
 };

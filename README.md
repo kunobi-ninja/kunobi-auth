@@ -150,6 +150,16 @@ access token is injected into its transport. Use `oauth::OAuthHttp` and
 `oauth::GrantRegistry` and `oauth::RefreshBroker` when the host manages pending
 flows or refreshes across connection lifecycle events.
 
+For storage reached through an async host RPC, implement `oauth::AsyncTokenStore`
+and construct `oauth::AsyncRefreshBroker` with `AsyncRefreshBrokerConfig`.
+Its storage operations yield while waiting; it shares the synchronous broker's
+single-flight refresh engine and implements the same `CredentialBroker` trait.
+Use the same per-grant `commit_lock` for refresh, grant completion, replacement
+and removal. The host must fence writes that can finish after RPC cancellation.
+Storage errors propagate without an automatic write or refresh retry.
+The existing `TokenStore`, `RefreshBroker` and exhaustive `RefreshBrokerConfig`
+literals remain supported.
+
 ### Logout with revocation, introspection
 
 ```rust
