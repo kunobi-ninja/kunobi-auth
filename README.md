@@ -550,19 +550,16 @@ temporary ignore for the transitive RSA Marvin advisory.
 
 ### Coverage
 
-The crate uses [`cargo-tarpaulin`](https://github.com/xd009642/tarpaulin)
-for Rust coverage. CI runs the same command with a `60%` line-coverage floor
-(currently ~71%) and uploads `coverage/tarpaulin-report.json`
-as a workflow artifact.
+The crate uses [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)
+with the LLVM tools from the pinned Rust toolchain. CI requires `60%` line
+coverage across the workspace and uploads `coverage/llvm-cov.json`.
 
 ```sh
-cargo install cargo-tarpaulin --locked --version 0.35.4
+mise install
+mise exec -- rustup component add llvm-tools-preview
 mise run coverage       # JSON report in ./coverage
 mise run coverage:html  # HTML report in ./coverage
 ```
-
-On macOS, installing Tarpaulin may require `pkg-config`/OpenSSL
-development headers (for example, `brew install pkgconf openssl`).
 
 Coverage is a trend signal, not a security proof. For auth-critical
 boundaries, prefer adding focused tests and pinning them with mutation

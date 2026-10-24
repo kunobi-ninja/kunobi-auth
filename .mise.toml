@@ -11,6 +11,8 @@ rust = "1.99.1"
 # Static-analysis CLI used by `.github/workflows/ci.yml`.
 "aqua:EmbarkStudios/cargo-deny" = "0.19.4"
 
+"cargo:cargo-llvm-cov" = "0.9.1"
+
 # Mutation testing. Local-only by design (a full run takes 5-10 minutes
 # on this crate, much too long to gate every PR). Run with `mise run mutants`.
 "cargo:cargo-mutants" = "25.3.1"
@@ -28,12 +30,12 @@ description = "Run mutants on a single file (e.g. mise run mutants:file -- src/s
 run = "cargo mutants --no-times --timeout-multiplier 2 -- --all-features --file"
 
 [tasks.coverage]
-description = "Run Rust test coverage with cargo-tarpaulin."
-run = "cargo tarpaulin --engine llvm --all-features --workspace --out Json --output-dir coverage"
+description = "Run Rust test coverage with cargo-llvm-cov."
+run = "mkdir -p coverage && cargo llvm-cov --locked --workspace --all-features --json --output-path coverage/llvm-cov.json"
 
 [tasks."coverage:html"]
 description = "Run Rust test coverage and render an HTML report."
-run = "cargo tarpaulin --engine llvm --all-features --workspace --out Html --output-dir coverage"
+run = "cargo llvm-cov --locked --workspace --all-features --html --output-dir coverage"
 
 [tasks.deny]
 description = "Run cargo-deny policy checks."
