@@ -96,7 +96,6 @@ pub fn verify_rsa_signature(
 /// According to https://briansmith.org/rustdoc/ring/signature/index.html#ecdsa__fixed-details-fixed-length-pkcs11-style-ecdsa-signatures,
 /// to recover the X and Y coordinates from an octet string, the Octet-String-To-Elliptic-Curve-Point Conversion
 /// is used (Section 2.3.4 of https://www.secg.org/sec1-v2.pdf).
-
 pub fn verify_ec_signature(
     key: &CoreJsonWebKey,
     msg: &[u8],

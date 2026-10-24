@@ -662,10 +662,24 @@ fn expect_hmac(
     let sig = secret_key.sign(alg, message).unwrap();
     assert_eq!(expected_sig_base64, BASE64_STANDARD.encode(&sig));
 
-    secret_key
-        .as_verification_key()
-        .verify_signature(alg, message, &sig)
-        .unwrap();
+    let key = secret_key.as_verification_key();
+    key.verify_signature(alg, message, &sig).unwrap();
+
+    let mut extended = sig.clone();
+    extended.push(0);
+    let mut incorrect = sig.clone();
+    incorrect[0] ^= 0x80;
+    for malformed in [
+        &[][..],
+        &sig[..sig.len() - 1],
+        &extended[..],
+        &incorrect[..],
+    ] {
+        assert!(matches!(
+            key.verify_signature(alg, message, malformed),
+            Err(SignatureVerificationError::CryptoError(_))
+        ));
+    }
 }
 
 #[test]
