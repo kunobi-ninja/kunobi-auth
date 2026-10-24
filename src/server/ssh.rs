@@ -398,37 +398,11 @@ pub fn build_signed_message(
     format!("{timestamp}\n{nonce}\n{method} {path_with_query}\n{body_hash}").into_bytes()
 }
 
-/// Verify an SSH signature and return the authenticated identity.
-///
-/// Steps:
-/// 1. Parse and drift-check the timestamp.
-/// 2. Look up the key by fingerprint across `providers`.
-/// 3. Check for revocation.
-/// 4. Reconstruct the signed message.
-/// 5. Deserialize the SSHSIG from `header.signature`.
-/// 6. Verify namespace matches.
-/// 7. Verify signature via `public_key.verify(namespace, message, sshsig)`.
-/// 8. Build the identity string from the provider's template.
-pub fn verify_ssh_signature(
-    header: &SshSignatureHeader,
-    namespace: &str,
-    method: &str,
-    path_with_query: &str,
-    body: &[u8],
-    providers: &[CompiledSshProvider],
+fn validate_timestamp_drift(
+    ts_secs: i64,
+    now_secs: i64,
     max_drift: Duration,
-) -> Result<VerifiedSshIdentity, AuthError> {
-    // 1. Validate timestamp drift.
-    let ts_secs: i64 = header
-        .timestamp
-        .parse()
-        .map_err(|_| AuthError::Unauthorized("timestamp must be a unix epoch integer".into()))?;
-
-    let now_secs = std::time::SystemTime::now()
-        .duration_since(std::time::UNIX_EPOCH)
-        .map_err(|e| AuthError::internal_with_source("system clock error", e))?
-        .as_secs() as i64;
-
+) -> Result<(), AuthError> {
     // Drift check is asymmetric.
     //
     // - Past drift: allow up to `max_drift`. Network latency + retries.
@@ -463,6 +437,42 @@ pub fn verify_ssh_signature(
             )));
         }
     }
+
+    Ok(())
+}
+
+/// Verify an SSH signature and return the authenticated identity.
+///
+/// Steps:
+/// 1. Parse and drift-check the timestamp.
+/// 2. Look up the key by fingerprint across `providers`.
+/// 3. Check for revocation.
+/// 4. Reconstruct the signed message.
+/// 5. Deserialize the SSHSIG from `header.signature`.
+/// 6. Verify namespace matches.
+/// 7. Verify signature via `public_key.verify(namespace, message, sshsig)`.
+/// 8. Build the identity string from the provider's template.
+pub fn verify_ssh_signature(
+    header: &SshSignatureHeader,
+    namespace: &str,
+    method: &str,
+    path_with_query: &str,
+    body: &[u8],
+    providers: &[CompiledSshProvider],
+    max_drift: Duration,
+) -> Result<VerifiedSshIdentity, AuthError> {
+    // 1. Validate timestamp drift.
+    let ts_secs: i64 = header
+        .timestamp
+        .parse()
+        .map_err(|_| AuthError::Unauthorized("timestamp must be a unix epoch integer".into()))?;
+
+    let now_secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map_err(|e| AuthError::internal_with_source("system clock error", e))?
+        .as_secs() as i64;
+
+    validate_timestamp_drift(ts_secs, now_secs, max_drift)?;
 
     // 2. Find key by fingerprint (constant-time compare; fingerprints are
     // attacker-controlled input matched against a small key set).
@@ -1064,7 +1074,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn test_verify_rejects_expired_timestamp() {
+    async fn test_verify_rejects_out_of_window_timestamps_before_signature() {
         let k = parse_authorized_key(TEST_ED25519_PUB).unwrap();
         let provider = CompiledSshProvider {
             name: "test".into(),
@@ -1072,23 +1082,33 @@ mod tests {
             revoked_fingerprints: HashSet::new(),
             identity_template: "{comment}".into(),
         };
-        let old_ts = "946684800"; // year 2000
         let sig_b64 = B64.encode(b"dummy");
-        let header_str = format!(
-            r#"fingerprint="SHA256:x",timestamp="{old_ts}",nonce="n",signature="{sig_b64}""#
-        );
-        let header = parse_ssh_auth_header(&header_str).unwrap();
-        let err = verify_ssh_signature(
-            &header,
-            "test-ns",
-            "GET",
-            "/",
-            &[],
-            &[provider],
-            Duration::from_secs(300),
-        )
-        .unwrap_err();
-        assert!(matches!(err, AuthError::Unauthorized(_)));
+
+        for (timestamp, direction) in [
+            ("946684800", "in the past"),
+            ("9223372036854775807", "in the future"),
+        ] {
+            let header_str = format!(
+                r#"fingerprint="SHA256:x",timestamp="{timestamp}",nonce="n",signature="{sig_b64}""#
+            );
+            let header = parse_ssh_auth_header(&header_str).unwrap();
+            let err = verify_ssh_signature(
+                &header,
+                "test-ns",
+                "GET",
+                "/",
+                &[],
+                std::slice::from_ref(&provider),
+                Duration::from_secs(300),
+            )
+            .unwrap_err();
+
+            assert!(
+                matches!(&err, AuthError::Unauthorized(message)
+                    if message.starts_with("timestamp is ") && message.contains(direction)),
+                "timestamp validation must reject before key or signature lookup: {err:?}"
+            );
+        }
     }
 
     #[tokio::test]
@@ -1232,208 +1252,73 @@ mod tests {
         assert!(matches!(err, AuthError::Unauthorized(_)));
     }
 
-    /// Boundary check: a drift of *exactly* `max_drift` seconds must still be
-    /// accepted (`>` comparison, not `>=`).
-    #[tokio::test]
-    async fn test_verify_drift_at_boundary_accepted() {
-        use rand_core::OsRng;
-        let private_key = ssh_key::PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-        let public_key = private_key.public_key().clone();
-        let fingerprint = public_key.fingerprint(HashAlg::Sha256).to_string();
-        let parsed = ParsedAuthorizedKey {
-            fingerprint: fingerprint.clone(),
-            public_key,
-            comment: "boundary@test".into(),
-        };
-        let provider = CompiledSshProvider {
-            name: "svc".into(),
-            keys: vec![parsed],
-            revoked_fingerprints: HashSet::new(),
-            identity_template: "{fingerprint}".into(),
-        };
-
+    #[test]
+    fn timestamp_drift_accepts_past_boundary() {
+        let now_secs = 1_700_000_000;
         let max_drift = Duration::from_secs(300);
 
-        // Timestamp exactly at the boundary (300s in the past) -- should pass.
-        let now_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        let ts_boundary = (now_unix - max_drift.as_secs() as i64).to_string();
-
-        let message = build_signed_message(&ts_boundary, "n-bd", "GET", "/", &[]);
-        let sshsig = private_key
-            .sign("svc-ns", HashAlg::Sha512, &message)
-            .unwrap();
-        let sig_b64 = encode_sshsig(&sshsig);
-
-        let header_str = format!(
-            r#"fingerprint="{fingerprint}",timestamp="{ts_boundary}",nonce="n-bd",signature="{sig_b64}""#
-        );
-        let header = parse_ssh_auth_header(&header_str).unwrap();
-
-        let result =
-            verify_ssh_signature(&header, "svc-ns", "GET", "/", &[], &[provider], max_drift);
-        assert!(
-            result.is_ok(),
-            "drift == max_drift must be accepted: {result:?}"
-        );
+        for past_drift in [0, 299, 300] {
+            validate_timestamp_drift(now_secs - past_drift, now_secs, max_drift)
+                .expect("past drift up to and including 300 seconds must pass");
+        }
     }
 
-    /// Boundary check: a drift of `max_drift + 1` seconds must be rejected.
-    #[tokio::test]
-    async fn test_verify_drift_one_past_boundary_rejected() {
-        use rand_core::OsRng;
-        let private_key = ssh_key::PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-        let public_key = private_key.public_key().clone();
-        let fingerprint = public_key.fingerprint(HashAlg::Sha256).to_string();
-        let parsed = ParsedAuthorizedKey {
-            fingerprint: fingerprint.clone(),
-            public_key,
-            comment: "over@test".into(),
-        };
-        let provider = CompiledSshProvider {
-            name: "svc".into(),
-            keys: vec![parsed],
-            revoked_fingerprints: HashSet::new(),
-            identity_template: "{fingerprint}".into(),
-        };
-
-        let max_drift = Duration::from_secs(300);
-        let now_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        // 1s past the limit.
-        let ts_over = (now_unix - max_drift.as_secs() as i64 - 1).to_string();
-
-        let message = build_signed_message(&ts_over, "n-over", "GET", "/", &[]);
-        let sshsig = private_key
-            .sign("svc-ns", HashAlg::Sha512, &message)
-            .unwrap();
-        let sig_b64 = encode_sshsig(&sshsig);
-
-        let header_str = format!(
-            r#"fingerprint="{fingerprint}",timestamp="{ts_over}",nonce="n-over",signature="{sig_b64}""#
-        );
-        let header = parse_ssh_auth_header(&header_str).unwrap();
-
-        let err = verify_ssh_signature(&header, "svc-ns", "GET", "/", &[], &[provider], max_drift)
+    #[test]
+    fn timestamp_drift_rejects_one_past_boundary() {
+        let now_secs = 1_700_000_000;
+        let err = validate_timestamp_drift(now_secs - 301, now_secs, Duration::from_secs(300))
             .unwrap_err();
-        assert!(matches!(err, AuthError::Unauthorized(_)));
-    }
 
-    /// Future timestamps within `MAX_FUTURE_CLOCK_SKEW` are accepted -- this
-    /// allowance exists exactly to absorb harmless client/server clock skew.
-    #[tokio::test]
-    async fn test_verify_small_future_drift_accepted() {
-        use rand_core::OsRng;
-        let private_key = ssh_key::PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-        let public_key = private_key.public_key().clone();
-        let fingerprint = public_key.fingerprint(HashAlg::Sha256).to_string();
-        let parsed = ParsedAuthorizedKey {
-            fingerprint: fingerprint.clone(),
-            public_key,
-            comment: "skew@test".into(),
-        };
-        let provider = CompiledSshProvider {
-            name: "svc".into(),
-            keys: vec![parsed],
-            revoked_fingerprints: HashSet::new(),
-            identity_template: "{fingerprint}".into(),
-        };
-
-        let now_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        // 2 seconds in the future -- under MAX_FUTURE_CLOCK_SKEW (5s).
-        let ts_future = (now_unix + 2).to_string();
-        let message = build_signed_message(&ts_future, "n-fut", "GET", "/", &[]);
-        let sshsig = private_key
-            .sign("svc-ns", HashAlg::Sha512, &message)
-            .unwrap();
-        let sig_b64 = encode_sshsig(&sshsig);
-
-        let header_str = format!(
-            r#"fingerprint="{fingerprint}",timestamp="{ts_future}",nonce="n-fut",signature="{sig_b64}""#
-        );
-        let header = parse_ssh_auth_header(&header_str).unwrap();
-
-        let result = verify_ssh_signature(
-            &header,
-            "svc-ns",
-            "GET",
-            "/",
-            &[],
-            std::slice::from_ref(&provider),
-            Duration::from_secs(300),
-        );
         assert!(
-            result.is_ok(),
-            "small future drift must be accepted: {result:?}"
+            matches!(&err, AuthError::Unauthorized(message) if message ==
+            "timestamp is 301s in the past; max past drift is 300s")
         );
     }
 
-    /// Future timestamps beyond `MAX_FUTURE_CLOCK_SKEW` are rejected -- the
-    /// hardening that prevents widening the replay window via future-dated
-    /// captured requests. Past `max_drift` is generous (e.g. 300s) but
-    /// future drift must stay tight.
-    #[tokio::test]
-    async fn test_verify_large_future_drift_rejected() {
-        use rand_core::OsRng;
-        let private_key = ssh_key::PrivateKey::random(&mut OsRng, Algorithm::Ed25519).unwrap();
-        let public_key = private_key.public_key().clone();
-        let fingerprint = public_key.fingerprint(HashAlg::Sha256).to_string();
-        let parsed = ParsedAuthorizedKey {
-            fingerprint: fingerprint.clone(),
-            public_key,
-            comment: "futuristic@test".into(),
-        };
-        let provider = CompiledSshProvider {
-            name: "svc".into(),
-            keys: vec![parsed],
-            revoked_fingerprints: HashSet::new(),
-            identity_template: "{fingerprint}".into(),
-        };
+    #[test]
+    fn timestamp_drift_accepts_future_boundary() {
+        let now_secs = 1_700_000_000;
 
-        let now_unix = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .unwrap()
-            .as_secs() as i64;
-        // 60s in the future -- past MAX_FUTURE_CLOCK_SKEW (5s) by a lot.
-        // With the OLD symmetric drift check (max_drift = 300s) this would
-        // have been accepted; a captured request with this timestamp would
-        // have stayed drift-valid for ~600s, easily outliving any reasonable
-        // NonceTracker.max_age.
-        let ts_far_future = (now_unix + 60).to_string();
-        let message = build_signed_message(&ts_far_future, "n-far", "GET", "/", &[]);
-        let sshsig = private_key
-            .sign("svc-ns", HashAlg::Sha512, &message)
-            .unwrap();
-        let sig_b64 = encode_sshsig(&sshsig);
+        for future_drift in [1, 2, 5] {
+            validate_timestamp_drift(now_secs + future_drift, now_secs, Duration::from_secs(300))
+                .expect("future drift up to and including 5 seconds must pass");
+        }
+    }
 
-        let header_str = format!(
-            r#"fingerprint="{fingerprint}",timestamp="{ts_far_future}",nonce="n-far",signature="{sig_b64}""#
-        );
-        let header = parse_ssh_auth_header(&header_str).unwrap();
+    #[test]
+    fn timestamp_drift_rejects_one_past_future_boundary() {
+        let now_secs = 1_700_000_000;
+        let err =
+            validate_timestamp_drift(now_secs + 6, now_secs, Duration::from_secs(300)).unwrap_err();
 
-        let err = verify_ssh_signature(
-            &header,
-            "svc-ns",
-            "GET",
-            "/",
-            &[],
-            std::slice::from_ref(&provider),
-            Duration::from_secs(300),
-        )
-        .unwrap_err();
-        let msg = format!("{err}");
-        assert!(matches!(err, AuthError::Unauthorized(_)));
         assert!(
-            msg.contains("future"),
-            "error should explain it's a future-drift issue: {msg}"
+            matches!(&err, AuthError::Unauthorized(message) if message ==
+            "timestamp is 6s in the future; max future skew is 5s")
         );
+    }
+
+    #[test]
+    fn timestamp_drift_rejects_extreme_timestamps_without_overflow() {
+        let now_secs = 1_700_000_000;
+
+        for timestamp in [i64::MIN, i64::MAX] {
+            assert!(matches!(
+                validate_timestamp_drift(timestamp, now_secs, Duration::from_secs(300)),
+                Err(AuthError::Unauthorized(_))
+            ));
+        }
+    }
+
+    #[test]
+    fn timestamp_drift_checks_zero_past_allowance() {
+        let now_secs = 1_700_000_000;
+
+        validate_timestamp_drift(now_secs, now_secs, Duration::ZERO)
+            .expect("the current second must pass with zero past allowance");
+        assert!(matches!(
+            validate_timestamp_drift(now_secs - 1, now_secs, Duration::ZERO),
+            Err(AuthError::Unauthorized(_))
+        ));
     }
 
     /// The error returned for an unknown fingerprint must NOT contain the
