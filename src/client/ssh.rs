@@ -250,3 +250,131 @@ impl SshAgentAuth {
         }
     }
 }
+
+#[cfg(all(test, unix))]
+mod tests {
+    use super::*;
+    use ssh_encoding::Decode;
+    use std::io::{Read, Write};
+    use std::os::unix::net::UnixListener;
+    use std::time::{Duration, Instant};
+
+    fn ssh_string(bytes: &[u8], output: &mut Vec<u8>) {
+        output.extend_from_slice(&u32::try_from(bytes.len()).unwrap().to_be_bytes());
+        output.extend_from_slice(bytes);
+    }
+
+    fn read_packet(socket: &mut impl Read) -> Vec<u8> {
+        let mut size = [0; 4];
+        socket.read_exact(&mut size).unwrap();
+        let size = u32::from_be_bytes(size) as usize;
+        assert!(size <= 4096);
+        let mut payload = vec![0; size];
+        socket.read_exact(&mut payload).unwrap();
+        payload
+    }
+
+    fn write_packet(socket: &mut impl Write, payload: &[u8]) {
+        let mut packet = Vec::new();
+        ssh_string(payload, &mut packet);
+        socket.write_all(&packet).unwrap();
+    }
+
+    #[test]
+    fn agent_signing_selects_ed25519_from_mixed_keys_and_verifies_sshsig() {
+        let private_key =
+            ssh_key::PrivateKey::random(&mut rand_core::OsRng, ssh_key::Algorithm::Ed25519)
+                .unwrap();
+        let public_key = private_key.public_key().clone();
+        let fingerprint = public_key.fingerprint(HashAlg::Sha256).to_string();
+        let namespace = "kunobi-agent-test";
+        let message = b"request body signed by the synthetic agent";
+        let expected = private_key
+            .sign(namespace, HashAlg::Sha512, message)
+            .unwrap();
+
+        // Keep the Unix socket path short enough for macOS. No process
+        // environment or real SSH agent is used by this test.
+        let directory = tempfile::Builder::new()
+            .prefix("ka-ssh-")
+            .tempdir_in("/tmp")
+            .unwrap();
+        let socket_path = directory.path().join("agent.sock");
+        let listener = UnixListener::bind(&socket_path).unwrap();
+        listener.set_nonblocking(true).unwrap();
+        let agent_key = public_key.clone();
+        let server = std::thread::spawn(move || {
+            let deadline = Instant::now() + Duration::from_secs(5);
+            let (mut socket, _) = loop {
+                match listener.accept() {
+                    Ok(connection) => break connection,
+                    Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
+                        assert!(
+                            Instant::now() < deadline,
+                            "synthetic SSH agent timed out waiting for a connection"
+                        );
+                        std::thread::sleep(Duration::from_millis(10));
+                    }
+                    Err(error) => panic!("synthetic SSH agent accept failed: {error}"),
+                }
+            };
+            socket.set_nonblocking(false).unwrap();
+            socket
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            socket
+                .set_write_timeout(Some(Duration::from_secs(5)))
+                .unwrap();
+            assert_eq!(read_packet(&mut socket), [11]);
+
+            // ECDSA parsing must work before the client can select Ed25519.
+            let other_key = PublicKey::from_openssh(
+                "ecdsa-sha2-nistp256 AAAAE2VjZHNhLXNoYTItbmlzdHAyNTYAAAAIbmlzdHAyNTYAAABBBHxUGDfJZXgCXPMYfKhFMWbHd/F6OJgGsUIMDJYJGzaLLQDn7JDLZ8uS3Z4ZJgU9XdVPvIKW+L6m4GJBgMilAck= test@example.com",
+            )
+            .unwrap();
+            let mut identities = vec![12];
+            identities.extend_from_slice(&2_u32.to_be_bytes());
+            for key in [&other_key, &agent_key] {
+                ssh_string(&key.to_bytes().unwrap(), &mut identities);
+                ssh_string(key.comment().as_bytes(), &mut identities);
+            }
+            write_packet(&mut socket, &identities);
+
+            let mut request = vec![13];
+            ssh_string(&agent_key.to_bytes().unwrap(), &mut request);
+            ssh_string(
+                &SshSig::signed_data(namespace, HashAlg::Sha512, message).unwrap(),
+                &mut request,
+            );
+            request.extend_from_slice(&0_u32.to_be_bytes());
+            assert_eq!(read_packet(&mut socket), request);
+
+            let mut signature = Vec::new();
+            expected.signature().encode(&mut signature).unwrap();
+            let mut response = vec![14];
+            ssh_string(&signature, &mut response);
+            write_packet(&mut socket, &response);
+        });
+
+        let result = SshAgentAuth::new(Some(fingerprint.clone())).sign_with_agent(
+            socket_path.to_str().unwrap(),
+            namespace,
+            message,
+        );
+        server.join().unwrap();
+        let (actual_fingerprint, bytes) = result.unwrap();
+        assert_eq!(actual_fingerprint, fingerprint);
+        let signature = SshSig::decode(&mut bytes.as_slice()).unwrap();
+        public_key.verify(namespace, message, &signature).unwrap();
+        assert!(
+            public_key
+                .verify(namespace, b"changed body", &signature)
+                .is_err()
+        );
+        assert!(
+            public_key
+                .verify("other-namespace", message, &signature)
+                .is_err()
+        );
+    }
+}

@@ -6,10 +6,19 @@ on:
   push:
     branches: [main]
   workflow_dispatch:
+    inputs:
+      prepublish:
+        description: Validate unpublished companions without the root packaging gate
+        type: boolean
+        required: false
+        default: false
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: true
+
+permissions:
+  contents: read
 
 env:
   CARGO_TERM_COLOR: always
@@ -21,13 +30,15 @@ env:
 
 jobs:
   checks:
-    name: Rust Checks
-    runs-on: kunobi-runners
+    name: ${{ github.event_name == 'workflow_dispatch' && inputs.prepublish == true && 'Prepublication Rust validation' || 'Rust Checks' }}
+    runs-on: ubuntu-latest
     container:
-      image: rust:1.94-bookworm
+      image: rust:1.99.1-bookworm
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Cache cargo
         uses: actions/cache@v6
@@ -36,11 +47,11 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+          key: cargo-${{ runner.os }}-rust1.99.1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-rust1.99.1-
 
       - name: Add Rust components
-        run: rustup component add rustfmt clippy
+        run: rustup component add --toolchain 1.99.1 rustfmt clippy llvm-tools-preview
 
       # Installs Rust from .mise.toml so local and CI toolchains share one
       # source of truth.
@@ -48,12 +59,12 @@ jobs:
         uses: jdx/mise-action@v4
         with:
           experimental: true
-          install_args: rust@1.94.1
+          install_args: rust@1.99.1
 
       - name: Install coverage tool
         uses: taiki-e/install-action@v2
         with:
-          tool: cargo-tarpaulin@0.35.4
+          tool: cargo-llvm-cov@0.9.1
 
       - name: Check formatting
         run: cargo fmt --check
@@ -74,17 +85,20 @@ jobs:
         run: cargo doc --lib --no-deps --no-default-features --features oauth
 
       - name: Verify standalone OAuth package
+        if: ${{ !(github.event_name == 'workflow_dispatch' && inputs.prepublish == true) }}
         run: cargo package --locked --no-default-features --features oauth
 
       - name: Coverage
-        run: cargo tarpaulin --engine llvm --all-features --workspace --out Json --output-dir coverage --fail-under 60
+        run: |
+          mkdir -p coverage
+          cargo llvm-cov --locked --workspace --all-features --json --output-path coverage/llvm-cov.json --fail-under-lines 60
 
       - name: Upload coverage report
         if: always()
         uses: actions/upload-artifact@v7
         with:
           name: coverage
-          path: coverage/tarpaulin-report.json
+          path: coverage/llvm-cov.json
           if-no-files-found: warn
 
       - name: Build (all features)
@@ -99,14 +113,32 @@ jobs:
       - name: Build docs
         run: cargo doc --lib --no-deps --all-features
 
+  msrv:
+    name: MSRV (Rust 1.95)
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1.95.0-bookworm
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: "1.95.0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check workspace at MSRV
+        run: cargo check --locked --workspace --all-features --all-targets
+
   deny:
     name: cargo-deny
-    runs-on: kunobi-runners
+    runs-on: ubuntu-latest
     container:
-      image: rust:1.94-bookworm
+      image: rust:1.99.1-bookworm
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Cache cargo
         uses: actions/cache@v6
@@ -128,13 +160,16 @@ jobs:
       - name: cargo deny check
         run: cargo deny check
 
-  e2e:
-    name: E2E (Dex)
-    runs-on: kunobi-runners
-    timeout-minutes: 15
-    needs: checks
+  companions:
+    name: Companion regression tests
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1.99.1-bookworm
+    timeout-minutes: 35
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
 
       - name: Cache cargo
         uses: actions/cache@v6
@@ -143,28 +178,106 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-e2e-${{ runner.os }}-
+          key: cargo-${{ runner.os }}-rust1.99.1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-rust1.99.1-
+
+      - name: Install mise tools
+        uses: jdx/mise-action@v4
+        with:
+          experimental: true
+          install_args: rust@1.99.1
+
+      - name: OIDC companion tests and examples
+        run: cargo test --locked -p kunobi-openidconnect --all-features --all-targets
+
+      - name: SSH agent companion tests and examples
+        run: cargo test --locked -p kunobi-ssh-agent-client-rs --all-targets
+
+      - name: RustCrypto provider compatibility
+        run: cargo test --locked --no-default-features --features rust_crypto --test jwt_crypto_compat
+
+      - name: AWS-LC provider compatibility
+        run: cargo test --locked --no-default-features --features aws_lc_rs --test jwt_crypto_compat
+
+      - name: Verify OIDC companion package
+        run: cargo package --locked -p kunobi-openidconnect --all-features
+
+      - name: Verify SSH agent companion package
+        run: cargo package --locked -p kunobi-ssh-agent-client-rs
+
+      - name: Upload verified companion packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: auth-companion-packages-${{ github.sha }}
+          path: |
+            target/package/kunobi-openidconnect-*.crate
+            target/package/kunobi-ssh-agent-client-rs-*.crate
+          if-no-files-found: error
+
+  native:
+    name: Native tests (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 35
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-latest, windows-latest]
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Install Rust
+        uses: jdx/mise-action@v4
+        with:
+          experimental: true
+          install_args: rust@1.99.1
+
+      - name: Native auth and keyring regressions
+        run: cargo test --locked --all-features
+
+      - name: Check iOS native keyring
+        if: runner.os == 'macOS'
+        env:
+          IPHONEOS_DEPLOYMENT_TARGET: "13.0"
+        run: |
+          rustup target add --toolchain 1.99.1 aarch64-apple-ios
+          cargo check --locked --target aarch64-apple-ios --no-default-features --features client-core,keyring,rust_crypto
+
+  e2e:
+    name: E2E (Dex)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Cache cargo
+        uses: actions/cache@v6
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: cargo-e2e-${{ runner.os }}-rust1.99.1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-e2e-${{ runner.os }}-rust1.99.1-
 
       - name: Install build toolchain
-        # The kunobi-runners pool runs e2e jobs natively (no container, since
-        # we need host docker for Dex). The runner image lacks a C toolchain
-        # which Rust crates with C deps require for linking. mise/rustup
-        # don't provide cc -- this has to come from the system package
-        # manager (or be pre-baked into the runner image).
+        # Dex runs on GitHub's Ubuntu host so Docker remains available.
+        # Install linking tools if the host does not already provide them.
         run: |
           if ! command -v cc >/dev/null; then
             sudo apt-get update -qq
             sudo apt-get install -y --no-install-recommends build-essential pkg-config
           fi
 
-      # Installs Rust 1.93.1 from .mise.toml. Replaces dtolnay/rust-toolchain
-      # so both jobs share one source of truth.
+      # Use the primary Rust 1.99.1 toolchain for Dex.
       - name: Install mise tools
         uses: jdx/mise-action@v4
         with:
           experimental: true # .mise.toml also defines cargo-backed local tools
-          install_args: rust@1.94.1
+          install_args: rust@1.99.1
 
       - name: Build Dex image
         run: docker build -t kunobi-dex -f tests/fixtures/Dockerfile.dex tests/fixtures

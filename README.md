@@ -3,8 +3,8 @@
 [![Crates.io](https://img.shields.io/crates/v/kunobi-auth.svg)](https://crates.io/crates/kunobi-auth)
 [![Docs.rs](https://img.shields.io/docsrs/kunobi-auth)](https://docs.rs/kunobi-auth)
 [![CI](https://github.com/kunobi-ninja/kunobi-auth/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kunobi-ninja/kunobi-auth/actions/workflows/ci.yml)
-[![License](https://img.shields.io/badge/license-Apache--2.0-blue.svg)](LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.94-blue.svg)](Cargo.toml)
+[![License](https://img.shields.io/badge/license-Apache--2.0_AND_MIT-blue.svg)](LICENSE)
+[![MSRV](https://img.shields.io/badge/MSRV-1.95-blue.svg)](Cargo.toml)
 
 Authentication framework for service APIs. Handles the full authn lifecycle — OIDC browser + device login, refresh-token persistence, token revocation/introspection, JWT validation with caching, SSH-key signed requests, DPoP-bound tokens — so your service focuses on authorization.
 
@@ -23,34 +23,38 @@ No Kubernetes dependency. Tested end-to-end against [Dex](https://dexidp.io/) v2
 | `server`     | yes     | JWT/JWKS validation (RS/PS/ES/EdDSA + auto-rotating cache), opt-in per-token validation cache, DPoP proof verifier (RFC 9449), SSH-signature verification with atomic-replay-protected nonce tracker, `AuthLayer` + axum extractors |
 | `mcp-server` | no      | MCP resource-server helpers on top of `server`: OAuth Protected Resource Metadata, MCP `WWW-Authenticate` challenges, and required bearer auth middleware                                           |
 | `oauth`      | no      | Provider-agnostic OAuth 2.0 access-token grants: RFC 9728/8414 discovery, PKCE, loopback callback, dynamic registration, keyed token storage, and refresh orchestration |
-| `rust_crypto` | yes    | jsonwebtoken's pure-Rust crypto backend                                                                                                                                                              |
-| `aws_lc_rs`  | no      | jsonwebtoken's aws-lc-rs crypto backend — pick this instead of `rust_crypto` if another dependency already enables jsonwebtoken's `aws_lc_rs`, to avoid enabling both backends (linking aws-lc-rs through rustls does not)                                  |
-| `aws-lc-tls` | yes     | Outbound HTTPS (discovery, JWKS, token endpoint) through reqwest's rustls with its bundled aws-lc-rs provider. Implied by `client`, `browser-login`, `server`, `oauth` (and so `keyring`, `mcp-server`) |
+| `rust_crypto` | yes | RustCrypto JWT provider with updated P-256/P-384 dependencies |
+| `aws_lc_rs` | no | jsonwebtoken's aws-lc-rs JWT provider; `rust_crypto` takes precedence when both auth features are enabled |
+| `aws-lc-tls` | yes     | Outbound HTTPS (discovery, JWKS, token endpoint) through reqwest's rustls with its bundled aws-lc-rs provider. Implied by `client`, `browser-login`, `server`, `oauth` (and `mcp-server`) |
 | `client-core` | no     | `client` without choosing a TLS provider, for builds that keep aws-lc-rs out (e.g. ring-only). HTTPS still works: install a rustls `CryptoProvider` before building any HTTP client (`AuthClient`, discovery, refresh) |
 | `browser-login-core` | no | `browser-login` without choosing a TLS provider; see `client-core` |
 | `server-core` | no | Marker for the axum-free server core (`JwksManager`, DPoP, SSH verification, audit log) — always compiled, needs no feature. Implied by `server` |
 | `oauth-core` | no | `oauth` without choosing a TLS provider; see `client-core` |
-| `keyring` | no | OS keychain-backed token storage (macOS Keychain / Windows Credential Manager) via `AuthClient::new_with_keyring`. Implies `client-core` |
+| `keyring` | no | OS keychain-backed token storage (macOS, iOS 13+ or Windows) via `AuthClient::new_with_keyring`. Implies `client-core` |
 
-**Upgrading from 0.11:** outbound HTTPS now needs a rustls provider. Every feature that makes HTTP calls (`client`, `browser-login`, `server`, `oauth`, and so `keyring`, `mcp-server`) implies `aws-lc-tls`, which supplies one, so those builds are unchanged. A build with `default-features = false` and none of them (for example only `rust_crypto`) that uses `JwksManager` directly must now add `aws-lc-tls` or install a rustls provider itself; otherwise reqwest panics when the client is built.
+**Upgrading from 0.11:** HTTPS now needs a rustls provider. `client`, `browser-login`, `server`, `oauth` and `mcp-server` enable `aws-lc-tls`. Builds using only `keyring`, `-core` features or `JwksManager` must enable `aws-lc-tls` or install a rustls provider before constructing an HTTP client.
 
 ```toml
 # Server only (no browser deps)
-kunobi-auth = { version = "1.0", default-features = false, features = ["server"] }
+kunobi-auth = { version = "1.1", default-features = false, features = ["server", "rust_crypto"] }
 
 # MCP server only
-kunobi-auth = { version = "1.0", default-features = false, features = ["mcp-server"] }
+kunobi-auth = { version = "1.1", default-features = false, features = ["mcp-server", "rust_crypto"] }
 
 # Client only
-kunobi-auth = { version = "1.0", default-features = false, features = ["client"] }
+kunobi-auth = { version = "1.1", default-features = false, features = ["client", "rust_crypto"] }
 ```
 
-**Crypto backend:** when using `default-features = false`, also enable exactly one
-of `rust_crypto` / `aws_lc_rs`. Cargo unifies features across the whole dependency
-graph, and jsonwebtoken 11 panics at the first JWT operation if both backends end
-up enabled and no provider was installed; `kunobi-auth` installs the backend you
-select here on first use (call `kunobi_auth::ensure_crypto_provider()` or
-jsonwebtoken's `CryptoProvider::install_default()` yourself to override).
+**Crypto backend:** select `rust_crypto` or `aws_lc_rs` when disabling default
+features. Kunobi-auth installs the selected provider before its JWT operations.
+An application-installed provider wins; when both auth features are enabled,
+Kunobi-auth prefers RustCrypto. TLS selection is separate.
+
+The RustCrypto provider uses jsonwebtoken 11's public extension API. It retains
+jsonwebtoken's public types and process-wide provider. Call
+`kunobi_auth::ensure_crypto_provider()` before using jsonwebtoken directly, and
+disable jsonwebtoken's built-in `rust_crypto` feature throughout the dependency
+graph. Enabling that upstream feature would retain its older curve dependencies.
 
 The `oauth` feature does not use JWT validation or require a JWT crypto backend.
 
@@ -134,7 +138,7 @@ Enable `oauth` for a provider API or remote MCP connection that needs OAuth
 **access tokens**:
 
 ```toml
-kunobi-auth = { version = "1.0", default-features = false, features = ["oauth"] }
+kunobi-auth = { version = "1.1", default-features = false, features = ["oauth"] }
 ```
 
 `kunobi_auth::oauth` is separate from `client::AuthClient`. `AuthClient` manages
@@ -546,19 +550,16 @@ temporary ignore for the transitive RSA Marvin advisory.
 
 ### Coverage
 
-The crate uses [`cargo-tarpaulin`](https://github.com/xd009642/tarpaulin)
-for Rust coverage. CI runs the same command with a `60%` line-coverage floor
-(currently ~71%) and uploads `coverage/tarpaulin-report.json`
-as a workflow artifact.
+The crate uses [`cargo-llvm-cov`](https://github.com/taiki-e/cargo-llvm-cov)
+with the LLVM tools from the pinned Rust toolchain. CI requires `60%` line
+coverage across the workspace and uploads `coverage/llvm-cov.json`.
 
 ```sh
-cargo install cargo-tarpaulin --locked --version 0.35.4
+mise install
+mise exec -- rustup component add llvm-tools-preview
 mise run coverage       # JSON report in ./coverage
 mise run coverage:html  # HTML report in ./coverage
 ```
-
-On macOS, installing Tarpaulin may require `pkg-config`/OpenSSL
-development headers (for example, `brew install pkgconf openssl`).
 
 Coverage is a trend signal, not a security proof. For auth-critical
 boundaries, prefer adding focused tests and pinning them with mutation
@@ -673,4 +674,6 @@ The tests share one Dex instance and refresh-token rotation is on, so `--test-th
 
 ## License
 
-Apache-2.0
+Kunobi-auth is licensed under [Apache-2.0](LICENSE). The RustCrypto JWT provider
+includes code from jsonwebtoken under its [MIT license](LICENSES/jsonwebtoken-MIT).
+The packaged license expression is `Apache-2.0 AND MIT`.
