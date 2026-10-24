@@ -107,8 +107,8 @@ jsonwebtoken = { version = "11.1.0", default-features = false, features = ["use_
 jwt-crypto-bigint = { package = "crypto-bigint", version = "0.7.6", optional = true, default-features = false }
 jwt-ed25519-dalek = { package = "ed25519-dalek", version = "3.0.0", optional = true, features = ["pkcs8"] }
 jwt-hmac = { package = "hmac", version = "0.13.0", optional = true }
-jwt-p256 = { package = "p256", version = "0.14.0", optional = true, default-features = false, features = ["alloc", "ecdsa", "pkcs8", "precomputed-tables"] }
-jwt-p384 = { package = "p384", version = "0.14.0", optional = true, default-features = false, features = ["alloc", "ecdsa", "pkcs8", "precomputed-tables"] }
+jwt-p256 = { package = "p256", version = "0.14.0", optional = true, default-features = false, features = ["alloc", "ecdsa", "pkcs8", "precomputed-tables", "std"] }
+jwt-p384 = { package = "p384", version = "0.14.0", optional = true, default-features = false, features = ["alloc", "ecdsa", "pkcs8", "precomputed-tables", "std"] }
 jwt-rand = { package = "rand", version = "0.8.5", optional = true, default-features = false, features = ["std", "std_rng"] }
 jwt-rsa = { package = "rsa", version = "0.9.6", optional = true }
 jwt-sha2 = { package = "sha2", version = "0.10.7", optional = true, features = ["oid"] }

@@ -188,6 +188,15 @@ jobs:
       - name: Verify SSH agent companion package
         run: cargo package --locked -p kunobi-ssh-agent-client-rs
 
+      - name: Upload verified companion packages
+        uses: actions/upload-artifact@v7
+        with:
+          name: auth-companion-packages-${{ github.sha }}
+          path: |
+            target/package/kunobi-openidconnect-*.crate
+            target/package/kunobi-ssh-agent-client-rs-*.crate
+          if-no-files-found: error
+
   native:
     name: Native tests (${{ matrix.os }})
     runs-on: ${{ matrix.os }}

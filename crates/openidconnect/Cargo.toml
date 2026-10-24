@@ -62,8 +62,8 @@ hmac = "0.13.0"
 hmac-sha2 = { package = "sha2", version = "0.11.1", default-features = false }
 rsa = "0.9.2"
 sha2 = { version = "0.10.6", features = ["oid"] } # Object ID needed for pkcs1v15 padding
-p256 = { version = "0.14.0", default-features = false, features = ["alloc", "ecdsa", "precomputed-tables"] }
-p384 = { version = "0.14.0", default-features = false, features = ["alloc", "ecdsa", "precomputed-tables"] }
+p256 = { version = "0.14.0", default-features = false, features = ["alloc", "ecdsa", "precomputed-tables", "std"] }
+p384 = { version = "0.14.0", default-features = false, features = ["alloc", "ecdsa", "precomputed-tables", "std"] }
 # Keep the curves on the fixed backend even when resolving minimum versions.
 crypto-bigint = { version = "0.7.6", default-features = false }
 dyn-clone = "1.0.10"
