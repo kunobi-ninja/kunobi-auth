@@ -176,7 +176,7 @@ impl JsonWebKey for CoreJsonWebKey {
         message: &[u8],
         signature: &[u8],
     ) -> Result<(), SignatureVerificationError> {
-        use hmac::Mac;
+        use hmac::{KeyInit, Mac};
 
         check_key_compatibility(self, signature_alg)
             .map_err(|e| SignatureVerificationError::InvalidKey(e.to_owned()))?;
@@ -261,7 +261,7 @@ impl JsonWebKey for CoreJsonWebKey {
                 )
             }
             CoreJwsSigningAlgorithm::HmacSha256 => {
-                let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(
+                let mut mac = hmac::Hmac::<hmac_sha2::Sha256>::new_from_slice(
                     self.k.as_ref().ok_or_else(|| {
                         SignatureVerificationError::InvalidKey(
                             "Symmetric key `k` is missing".to_string(),
@@ -276,7 +276,7 @@ impl JsonWebKey for CoreJsonWebKey {
                     .map_err(|_| SignatureVerificationError::CryptoError("bad HMAC".to_string()))
             }
             CoreJwsSigningAlgorithm::HmacSha384 => {
-                let mut mac = hmac::Hmac::<sha2::Sha384>::new_from_slice(
+                let mut mac = hmac::Hmac::<hmac_sha2::Sha384>::new_from_slice(
                     self.k.as_ref().ok_or_else(|| {
                         SignatureVerificationError::InvalidKey(
                             "Symmetric key `k` is missing".to_string(),
@@ -291,7 +291,7 @@ impl JsonWebKey for CoreJsonWebKey {
                     .map_err(|_| SignatureVerificationError::CryptoError("bad HMAC".to_string()))
             }
             CoreJwsSigningAlgorithm::HmacSha512 => {
-                let mut mac = hmac::Hmac::<sha2::Sha512>::new_from_slice(
+                let mut mac = hmac::Hmac::<hmac_sha2::Sha512>::new_from_slice(
                     self.k.as_ref().ok_or_else(|| {
                         SignatureVerificationError::InvalidKey(
                             "Symmetric key `k` is missing".to_string(),
@@ -416,24 +416,24 @@ impl PrivateSigningKey for CoreHmacKey {
         signature_alg: &CoreJwsSigningAlgorithm,
         message: &[u8],
     ) -> Result<Vec<u8>, SigningError> {
-        use hmac::Mac;
+        use hmac::{KeyInit, Mac};
         match *signature_alg {
             CoreJwsSigningAlgorithm::HmacSha256 => {
-                let mut mac = hmac::Hmac::<sha2::Sha256>::new_from_slice(&self.secret)
+                let mut mac = hmac::Hmac::<hmac_sha2::Sha256>::new_from_slice(&self.secret)
                     .map_err(|e| SigningError::Other(format!("Could not create key: {}", e)))?;
                 mac.update(message);
                 let result = mac.finalize();
                 Ok(result.into_bytes().as_slice().to_vec())
             }
             CoreJwsSigningAlgorithm::HmacSha384 => {
-                let mut mac = hmac::Hmac::<sha2::Sha384>::new_from_slice(&self.secret)
+                let mut mac = hmac::Hmac::<hmac_sha2::Sha384>::new_from_slice(&self.secret)
                     .map_err(|e| SigningError::Other(format!("Could not create key: {}", e)))?;
                 mac.update(message);
                 let result = mac.finalize();
                 Ok(result.into_bytes().as_slice().to_vec())
             }
             CoreJwsSigningAlgorithm::HmacSha512 => {
-                let mut mac = hmac::Hmac::<sha2::Sha512>::new_from_slice(&self.secret)
+                let mut mac = hmac::Hmac::<hmac_sha2::Sha512>::new_from_slice(&self.secret)
                     .map_err(|e| SigningError::Other(format!("Could not create key: {}", e)))?;
                 mac.update(message);
                 let result = mac.finalize();

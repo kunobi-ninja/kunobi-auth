@@ -7,16 +7,16 @@
 //! HMAC family of algorithms using `RustCrypto`'s [`jwt_hmac`].
 
 use jsonwebtoken::signature::{self, Signer, Verifier};
-use jwt_hmac::{Hmac, Mac};
-use jwt_sha2::{Sha256, Sha384, Sha512};
+use jwt_hmac::{HmacReset, KeyInit, Mac};
+use sha2::{Sha256, Sha384, Sha512};
 
 use jsonwebtoken::crypto::{JwtSigner, JwtVerifier};
 use jsonwebtoken::errors::{ErrorKind, Result, new_error};
 use jsonwebtoken::{Algorithm, AlgorithmFamily, DecodingKey, EncodingKey};
 
-type HmacSha256 = Hmac<Sha256>;
-type HmacSha384 = Hmac<Sha384>;
-type HmacSha512 = Hmac<Sha512>;
+type HmacSha256 = HmacReset<Sha256>;
+type HmacSha384 = HmacReset<Sha384>;
+type HmacSha512 = HmacReset<Sha512>;
 
 /// Macro to define an HMAC signer for a specific algorithm
 macro_rules! define_hmac_signer {

@@ -3,7 +3,7 @@
 // Adapted from jsonwebtoken 11.1.0, revision 4c0ae752e9acc108c8e2c4c8ed8128dc66014210.
 // See LICENSES/jsonwebtoken-MIT.
 
-use jwt_ed25519_dalek::{SigningKey as Ed25519SigningKey, pkcs8::DecodePrivateKey as _};
+use jwt_ed25519_dalek::SigningKey as Ed25519SigningKey;
 use jwt_p256 as p256;
 use jwt_p384 as p384;
 use jwt_rsa::{

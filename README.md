@@ -4,7 +4,7 @@
 [![Docs.rs](https://img.shields.io/docsrs/kunobi-auth)](https://docs.rs/kunobi-auth)
 [![CI](https://github.com/kunobi-ninja/kunobi-auth/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/kunobi-ninja/kunobi-auth/actions/workflows/ci.yml)
 [![License](https://img.shields.io/badge/license-Apache--2.0_AND_MIT-blue.svg)](LICENSE)
-[![MSRV](https://img.shields.io/badge/MSRV-1.94-blue.svg)](Cargo.toml)
+[![MSRV](https://img.shields.io/badge/MSRV-1.95-blue.svg)](Cargo.toml)
 
 Authentication framework for service APIs. Handles the full authn lifecycle — OIDC browser + device login, refresh-token persistence, token revocation/introspection, JWT validation with caching, SSH-key signed requests, DPoP-bound tokens — so your service focuses on authorization.
 
@@ -25,14 +25,14 @@ No Kubernetes dependency. Tested end-to-end against [Dex](https://dexidp.io/) v2
 | `oauth`      | no      | Provider-agnostic OAuth 2.0 access-token grants: RFC 9728/8414 discovery, PKCE, loopback callback, dynamic registration, keyed token storage, and refresh orchestration |
 | `rust_crypto` | yes | RustCrypto JWT provider with updated P-256/P-384 dependencies |
 | `aws_lc_rs` | no | jsonwebtoken's aws-lc-rs JWT provider; `rust_crypto` takes precedence when both auth features are enabled |
-| `aws-lc-tls` | yes     | Outbound HTTPS (discovery, JWKS, token endpoint) through reqwest's rustls with its bundled aws-lc-rs provider. Implied by `client`, `browser-login`, `server`, `oauth` (and so `keyring`, `mcp-server`) |
+| `aws-lc-tls` | yes     | Outbound HTTPS (discovery, JWKS, token endpoint) through reqwest's rustls with its bundled aws-lc-rs provider. Implied by `client`, `browser-login`, `server`, `oauth` (and `mcp-server`) |
 | `client-core` | no     | `client` without choosing a TLS provider, for builds that keep aws-lc-rs out (e.g. ring-only). HTTPS still works: install a rustls `CryptoProvider` before building any HTTP client (`AuthClient`, discovery, refresh) |
 | `browser-login-core` | no | `browser-login` without choosing a TLS provider; see `client-core` |
 | `server-core` | no | Marker for the axum-free server core (`JwksManager`, DPoP, SSH verification, audit log) — always compiled, needs no feature. Implied by `server` |
 | `oauth-core` | no | `oauth` without choosing a TLS provider; see `client-core` |
-| `keyring` | no | OS keychain-backed token storage (macOS Keychain / Windows Credential Manager) via `AuthClient::new_with_keyring`. Implies `client-core` |
+| `keyring` | no | OS keychain-backed token storage (macOS, iOS 13+ or Windows) via `AuthClient::new_with_keyring`. Implies `client-core` |
 
-**Upgrading from 0.11:** outbound HTTPS now needs a rustls provider. Every feature that makes HTTP calls (`client`, `browser-login`, `server`, `oauth`, and so `keyring`, `mcp-server`) implies `aws-lc-tls`, which supplies one, so those builds are unchanged. A build with `default-features = false` and none of them (for example only `rust_crypto`) that uses `JwksManager` directly must now add `aws-lc-tls` or install a rustls provider itself; otherwise reqwest panics when the client is built.
+**Upgrading from 0.11:** HTTPS now needs a rustls provider. `client`, `browser-login`, `server`, `oauth` and `mcp-server` enable `aws-lc-tls`. Builds using only `keyring`, `-core` features or `JwksManager` must enable `aws-lc-tls` or install a rustls provider before constructing an HTTP client.
 
 ```toml
 # Server only (no browser deps)

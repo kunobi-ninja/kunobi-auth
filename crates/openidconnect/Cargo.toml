@@ -8,7 +8,7 @@ license = "MIT"
 repository = "https://github.com/kunobi-ninja/kunobi-auth"
 edition = "2021"
 readme = "README.md"
-rust-version = "1.87"
+rust-version = "1.95"
 
 [lib]
 name = "openidconnect"
@@ -44,7 +44,7 @@ name = "okta_device_grant"
 required-features = ["reqwest-blocking"]
 
 [dependencies]
-base64 = "0.21"
+base64 = "0.23.1"
 # Disable 'time' dependency since it triggers RUSTSEC-2020-0071 and we don't need it.
 chrono = { version = "0.4", default-features = false, features = [
     "clock",
@@ -53,11 +53,13 @@ chrono = { version = "0.4", default-features = false, features = [
 ] }
 thiserror = "1.0"
 http = "1.0"
-itertools = "0.10"
+itertools = "0.15.0"
 log = "0.4"
 oauth2 = { version = "5.0.0", default-features = false }
 rand = "0.8.5"
-hmac = "0.12.1"
+hmac = "0.13.0"
+# HMAC uses digest 0.11; RSA 0.9 still uses the sha2/digest 0.10 dependency below.
+hmac-sha2 = { package = "sha2", version = "0.11.1", default-features = false }
 rsa = "0.9.2"
 sha2 = { version = "0.10.6", features = ["oid"] } # Object ID needed for pkcs1v15 padding
 p256 = { version = "0.14.0", default-features = false, features = ["alloc", "ecdsa", "precomputed-tables"] }
@@ -73,12 +75,12 @@ serde_with = "3"
 serde-value = "0.7"
 url = { version = "2.4", features = ["serde"] }
 subtle = "2.4"
-ed25519-dalek = { version = "2.0.0", features = ["pem"] }
+ed25519-dalek = { version = "3.0.0", features = ["pem"] }
 
 [dev-dependencies]
 color-backtrace = { version = "0.7.4" }
 env_logger = "0.11.11"
 pretty_assertions = "1.0"
 reqwest = { version = "0.12", features = ["blocking", "rustls-tls"], default-features = false }
-retry = "1.0"
+retry = "2.2.0"
 anyhow = "1.0"

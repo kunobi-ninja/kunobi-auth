@@ -11,7 +11,7 @@ use jsonwebtoken::errors::{ErrorKind, Result, new_error};
 use jsonwebtoken::signature::{Error, Signer, Verifier};
 use jsonwebtoken::{Algorithm, DecodingKey, EncodingKey};
 use jwt_ed25519_dalek::pkcs8::DecodePrivateKey;
-use jwt_ed25519_dalek::{Signature, SigningKey, VerifyingKey};
+use jwt_ed25519_dalek::{Signature, Signer as _, SigningKey, Verifier as _, VerifyingKey};
 
 pub struct EdDSASigner(SigningKey);
 
@@ -65,7 +65,12 @@ impl EdDSAVerifier {
 
 impl Verifier<Vec<u8>> for EdDSAVerifier {
     fn verify(&self, msg: &[u8], signature: &Vec<u8>) -> std::result::Result<(), Error> {
-        self.0.verify(msg, &Signature::from_slice(signature)?)?;
+        self.0
+            .verify(
+                msg,
+                &Signature::from_slice(signature).map_err(Error::from_source)?,
+            )
+            .map_err(Error::from_source)?;
         Ok(())
     }
 }

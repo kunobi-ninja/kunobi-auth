@@ -166,19 +166,18 @@ impl TokenStorage for TokenStore {
 }
 
 /// OS keychain-backed token storage (macOS Keychain / Windows Credential
-/// Manager via the `keyring` crate). One keychain entry per issuer holds the
+/// Manager via the keyring-core native stores). One keychain entry per issuer holds the
 /// serialized [`StoredToken`].
 ///
 /// # Platform support
-/// - **macOS / Windows**: native backends (`apple-native` / `windows-native`).
+/// - **macOS / iOS 13+ / Windows**: native keychain and credential-manager stores.
 /// - **Windows caveat**: Credential Manager caps a credential blob at 2560
 ///   bytes; [`save`](TokenStorage::save) returns an explicit error rather than
 ///   silently truncating if a large token (e.g. many `extra` claims) exceeds it.
 /// - **Linux / others**: NO native backend is compiled in by default, so the
-///   `keyring` crate falls back to an in-memory store that does **not** persist
-///   across restarts. Enable the crate's `sync-secret-service` (or
-///   `linux-native`) backend before relying on `KeyringStore` on Linux, or use
-///   the file-based [`TokenStore`] there.
+///   backend is a per-entry mock that does **not** persist credentials.
+///   Use the file-based [`TokenStore`] or supply another [`TokenStorage`]
+///   implementation there.
 #[cfg(feature = "keyring")]
 pub struct KeyringStore {
     service: String,
@@ -199,14 +198,55 @@ impl KeyringStore {
         }
     }
 
-    fn entry(&self, issuer: &str) -> Result<keyring::Entry> {
+    fn entry(&self, issuer: &str) -> Result<keyring_core::Entry> {
+        self.entry_with_backend(keyring_backend()?.as_ref(), issuer)
+    }
+
+    fn entry_with_backend(
+        &self,
+        backend: &keyring_core::CredentialStore,
+        issuer: &str,
+    ) -> Result<keyring_core::Entry> {
         // Hash the issuer to a stable, keychain-safe account key (mirrors the
         // file backend's filename hashing).
         use sha2::{Digest, Sha256};
         let account = hex::encode(Sha256::digest(issuer.as_bytes()));
-        keyring::Entry::new(&self.service, &account)
+        backend
+            .build(&self.service, &account, None)
             .map_err(|e| anyhow::anyhow!("Failed to open keychain entry: {e}"))
     }
+}
+
+#[cfg(feature = "keyring")]
+fn keyring_backend() -> Result<std::sync::Arc<keyring_core::CredentialStore>> {
+    #[cfg(any(target_os = "macos", target_os = "ios", target_os = "windows"))]
+    {
+        static BACKEND: std::sync::LazyLock<
+            keyring_core::Result<std::sync::Arc<keyring_core::CredentialStore>>,
+        > = std::sync::LazyLock::new(create_keyring_backend);
+        BACKEND
+            .as_ref()
+            .map(std::sync::Arc::clone)
+            .map_err(|error| anyhow::anyhow!("Failed to initialize keychain store: {error}"))
+    }
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
+    {
+        create_keyring_backend()
+            .map_err(|error| anyhow::anyhow!("Failed to initialize keychain store: {error}"))
+    }
+}
+
+#[cfg(feature = "keyring")]
+fn create_keyring_backend() -> keyring_core::Result<std::sync::Arc<keyring_core::CredentialStore>> {
+    #[cfg(target_os = "macos")]
+    let store = apple_native_keyring_store::keychain::Store::new()?;
+    #[cfg(target_os = "ios")]
+    let store = apple_native_keyring_store::protected::Store::new()?;
+    #[cfg(target_os = "windows")]
+    let store = windows_native_keyring_store::Store::new()?;
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
+    let store = keyring_core::mock::Store::new()?;
+    Ok(store)
 }
 
 #[cfg(feature = "keyring")]
@@ -221,7 +261,7 @@ impl TokenStorage for KeyringStore {
     fn load(&self, issuer: &str) -> Result<Option<StoredToken>> {
         match self.entry(issuer)?.get_password() {
             Ok(json) => Ok(Some(serde_json::from_str(&json)?)),
-            Err(keyring::Error::NoEntry) => Ok(None),
+            Err(keyring_core::Error::NoEntry) => Ok(None),
             Err(e) => Err(anyhow::anyhow!("keychain read failed: {e}")),
         }
     }
@@ -250,7 +290,7 @@ impl TokenStorage for KeyringStore {
 
     fn remove(&self, issuer: &str) -> Result<()> {
         match self.entry(issuer)?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
+            Ok(()) | Err(keyring_core::Error::NoEntry) => Ok(()),
             Err(e) => Err(anyhow::anyhow!("keychain delete failed: {e}")),
         }
     }
@@ -464,5 +504,54 @@ mod tests {
         let debug = format!("{token:?}");
         assert!(debug.contains("display_name")); // keys shown
         assert!(!debug.contains("Jane Doe")); // values not leaked
+    }
+}
+
+#[cfg(all(test, feature = "keyring"))]
+mod keyring_backend_tests {
+    use super::KeyringStore;
+
+    #[cfg(not(any(target_os = "macos", target_os = "ios", target_os = "windows")))]
+    #[test]
+    fn mock_backend_does_not_persist_between_entries() {
+        use super::{StoredToken, TokenStorage};
+
+        let issuer = "https://entry-only.example.com";
+        let store = KeyringStore::with_service("entry-only-test");
+        let token = StoredToken::new("test-token".into(), None, None, issuer.into());
+        let json = serde_json::to_string(&token).unwrap();
+
+        let entry = store.entry(issuer).unwrap();
+        entry.set_password(&json).unwrap();
+        assert_eq!(entry.get_password().unwrap(), json);
+        assert!(store.load(issuer).unwrap().is_none());
+        drop(entry);
+
+        store.save(&token).unwrap();
+        assert!(store.load(issuer).unwrap().is_none());
+    }
+
+    #[test]
+    fn native_store_migration_preserves_credential_identity() {
+        let backend = keyring_core::mock::Store::new().unwrap();
+        let store = KeyringStore::with_service("existing-service");
+        let entry = store
+            .entry_with_backend(backend.as_ref(), "https://issuer.example.com")
+            .unwrap();
+        assert_eq!(
+            entry.get_specifiers(),
+            Some((
+                "existing-service".into(),
+                "605ec2f11533f3f2274ec7d304db418b49f991bba3c7d27b1d2a1e4e1575c678".into(),
+            ))
+        );
+        let other_issuer = store
+            .entry_with_backend(backend.as_ref(), "https://another.example.com")
+            .unwrap();
+        assert_ne!(entry.get_specifiers(), other_issuer.get_specifiers());
+        let other_service = KeyringStore::with_service("another-service")
+            .entry_with_backend(backend.as_ref(), "https://issuer.example.com")
+            .unwrap();
+        assert_ne!(entry.get_specifiers(), other_service.get_specifiers());
     }
 }

@@ -61,7 +61,7 @@ impl AuthClient {
     }
 
     /// Create an OIDC auth client that persists tokens in the OS keychain
-    /// (macOS Keychain / Windows Credential Manager).
+    /// (macOS Keychain, iOS 13+ or Windows Credential Manager).
     #[cfg(feature = "keyring")]
     pub fn new_with_keyring(config: ServiceConfig) -> Self {
         Self {

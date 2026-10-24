@@ -2,8 +2,10 @@
 
 This is Kunobi's companion package for upstream openidconnect 4.0.1
 (commit b639b5d39eac6903238867aeb2b29326502e6b26). It uses P-256/P-384 0.14
-with crypto-bigint 0.7.6 or newer. Upstream source and MIT licensing are retained.
-The package is named kunobi-openidconnect; the library name remains openidconnect.
+with crypto-bigint 0.7.6 or newer, Ed25519-dalek 3 and HMAC 0.13. The HMAC
+adapter uses the new digest API; RSA retains its compatible SHA-2/RNG families.
+Upstream authorship and MIT licensing are retained. The package is named
+kunobi-openidconnect; the library name remains openidconnect.
 
 This library provides extensible, strongly-typed interfaces for the OpenID
 Connect protocol, which can be used to authenticate users via
@@ -16,7 +18,7 @@ Upstream API documentation and examples are available on [docs.rs](https://docs.
 
 ## Minimum Supported Rust Version (MSRV)
 
-This companion package requires Rust **1.87**. Upstream *3.3* through *4.0.1* releases support Rust **1.65**.
+This companion package requires Rust **1.95**, matching kunobi-auth. Upstream *3.3* through *4.0.1* releases support Rust **1.65**.
 
 The MSRV for upstream *3.0* to *3.2* releases is Rust **1.57**.
 

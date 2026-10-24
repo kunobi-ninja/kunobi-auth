@@ -279,3 +279,56 @@ fn provider_refuses_valid_key_material_with_the_wrong_key_family() {
         assert!(verify(&signature, message, &wrong_decoding_family, algorithm).is_err());
     }
 }
+
+#[test]
+fn hmac_matches_rfc4231_case_two() {
+    kunobi_auth::ensure_crypto_provider();
+    let encoding_key = EncodingKey::from_secret(b"Jefe");
+    let decoding_key = DecodingKey::from_secret(b"Jefe");
+    let message = b"what do ya want for nothing?";
+    for (algorithm, expected) in [
+        (
+            Algorithm::HS256,
+            "5bdcc146bf60754e6a042426089575c75a003f089d2739839dec58b964ec3843",
+        ),
+        (
+            Algorithm::HS384,
+            "af45d2e376484031617f78d2b58a6b1b9c7ef464f5a01b47e42ec3736322445e8e2240ca5e69e2c78b3239ecfab21649",
+        ),
+        (
+            Algorithm::HS512,
+            "164b7a7bfcf819e2e395fbe73b56e0a387bd64222e831fd610270cd7ea2505549758bf75c05a994a6d034f65f8f0e6fdcaeab1a34d4a6b4b636e070a38bce737",
+        ),
+    ] {
+        let signature = sign(message, &encoding_key, algorithm).unwrap();
+        assert_eq!(URL_SAFE_NO_PAD.decode(&signature).unwrap(), unhex(expected));
+        assert!(verify(&signature, message, &decoding_key, algorithm).unwrap());
+        assert!(!verify(&signature, b"changed", &decoding_key, algorithm).unwrap());
+    }
+}
+
+#[test]
+fn eddsa_verifies_rfc8032_case_two_and_refuses_malformed_signatures() {
+    kunobi_auth::ensure_crypto_provider();
+    let key = DecodingKey::from_ed_der(&unhex(
+        "3d4017c3e843895a92b70aa74d1b7ebc9c982ccf2ec4968cc0cd55f12af4660c",
+    ));
+    let signature = unhex(concat!(
+        "92a009a9f0d4cab8720e820b5f642540a2b27b5416503f8fb3762223ebdb69da",
+        "085ac1e43e15996e458f3613d0f11d8c387b2eaeb4302aeeb00d291612bb0c00",
+    ));
+    let encoded = URL_SAFE_NO_PAD.encode(&signature);
+    assert!(verify(&encoded, &[0x72], &key, Algorithm::EdDSA).unwrap());
+    assert!(!verify(&encoded, &[0x73], &key, Algorithm::EdDSA).unwrap());
+    for malformed in [&signature[..63], &[0_u8; 64][..]] {
+        assert!(
+            !verify(
+                &URL_SAFE_NO_PAD.encode(malformed),
+                &[0x72],
+                &key,
+                Algorithm::EdDSA,
+            )
+            .unwrap()
+        );
+    }
+}
