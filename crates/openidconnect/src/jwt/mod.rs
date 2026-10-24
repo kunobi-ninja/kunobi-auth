@@ -234,7 +234,7 @@ where
     }
 
     fn serialize(payload: &P) -> Result<String, serde_json::Error> {
-        serde_json::to_string(payload).map_err(Into::into)
+        serde_json::to_string(payload)
     }
 }
 
