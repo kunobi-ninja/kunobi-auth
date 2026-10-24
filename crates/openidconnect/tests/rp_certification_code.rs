@@ -1,7 +1,7 @@
 #![allow(clippy::expect_fun_call)]
 
 use crate::rp_common::{
-    get_provider_metadata, http_client, init_log, issuer_url, register_client, PanicIfFail,
+    get_provider_metadata, get_test_id, http_client, init_log, issuer_url, register_client,
 };
 
 use http::header::LOCATION;
@@ -25,6 +25,34 @@ use url::Url;
 use std::collections::HashMap;
 
 mod rp_common;
+
+trait PanicIfFail<T, F>
+where
+    F: std::error::Error,
+{
+    fn panic_if_fail(self, msg: &'static str) -> T;
+}
+impl<T, F> PanicIfFail<T, F> for Result<T, F>
+where
+    F: std::error::Error,
+{
+    fn panic_if_fail(self, msg: &'static str) -> T {
+        match self {
+            Ok(ret) => ret,
+            Err(fail) => {
+                let mut err_msg = format!("Panic: {}", msg);
+
+                let mut cur_fail: Option<&dyn std::error::Error> = Some(&fail);
+                while let Some(cause) = cur_fail {
+                    err_msg += &format!("\n    caused by: {}", cause);
+                    cur_fail = cause.source();
+                }
+                error!("[{}] {}", get_test_id(), err_msg);
+                panic!("{}", msg);
+            }
+        }
+    }
+}
 
 struct TestState {
     access_token: Option<AccessToken>,

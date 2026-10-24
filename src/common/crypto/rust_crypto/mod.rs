@@ -92,6 +92,7 @@ fn compute_digest(data: &[u8], hash_function: ThumbprintHash) -> errors::Result<
         ThumbprintHash::SHA256 => Sha256::digest(data).to_vec(),
         ThumbprintHash::SHA384 => Sha384::digest(data).to_vec(),
         ThumbprintHash::SHA512 => Sha512::digest(data).to_vec(),
+        _ => return Err(ErrorKind::InvalidAlgorithm.into()),
     })
 }
 
@@ -109,6 +110,7 @@ fn new_signer(algorithm: &Algorithm, key: &EncodingKey) -> Result<Box<dyn JwtSig
         Algorithm::PS384 => Box::new(rsa::RsaPss384Signer::new(key)?) as Box<dyn JwtSigner>,
         Algorithm::PS512 => Box::new(rsa::RsaPss512Signer::new(key)?) as Box<dyn JwtSigner>,
         Algorithm::EdDSA => Box::new(eddsa::EdDSASigner::new(key)?) as Box<dyn JwtSigner>,
+        _ => return Err(ErrorKind::InvalidAlgorithm.into()),
     };
 
     Ok(jwt_signer)
@@ -128,6 +130,7 @@ fn new_verifier(algorithm: &Algorithm, key: &DecodingKey) -> Result<Box<dyn JwtV
         Algorithm::PS384 => Box::new(rsa::RsaPss384Verifier::new(key)?) as Box<dyn JwtVerifier>,
         Algorithm::PS512 => Box::new(rsa::RsaPss512Verifier::new(key)?) as Box<dyn JwtVerifier>,
         Algorithm::EdDSA => Box::new(eddsa::EdDSAVerifier::new(key)?) as Box<dyn JwtVerifier>,
+        _ => return Err(ErrorKind::InvalidAlgorithm.into()),
     };
 
     Ok(jwt_verifier)

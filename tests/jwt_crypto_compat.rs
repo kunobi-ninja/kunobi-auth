@@ -85,6 +85,7 @@ fn keys(algorithm: Algorithm) -> (EncodingKey, DecodingKey, DecodingKey) {
                 "d75a980182b10ab7d54bfed3c964073a0ee172f3daa62325af021a68f707511a",
             )),
         ),
+        _ => panic!("unsupported test algorithm: {algorithm:?}"),
     }
 }
 
