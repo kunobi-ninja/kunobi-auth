@@ -33,7 +33,7 @@ jobs:
     name: ${{ github.event_name == 'workflow_dispatch' && inputs.prepublish == true && 'Prepublication Rust validation' || 'Rust Checks' }}
     runs-on: ubuntu-latest
     container:
-      image: rust:1.95-bookworm
+      image: rust:1.99.1-bookworm
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@v7
@@ -47,8 +47,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+          key: cargo-${{ runner.os }}-rust1.99.1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-rust1.99.1-
 
       - name: Add Rust components
         run: rustup component add rustfmt clippy
@@ -59,7 +59,7 @@ jobs:
         uses: jdx/mise-action@v4
         with:
           experimental: true
-          install_args: rust@1.95.0
+          install_args: rust@1.99.1
 
       - name: Install coverage tool
         uses: taiki-e/install-action@v2
@@ -111,11 +111,27 @@ jobs:
       - name: Build docs
         run: cargo doc --lib --no-deps --all-features
 
+  msrv:
+    name: MSRV (Rust 1.95)
+    runs-on: ubuntu-latest
+    container:
+      image: rust:1.95.0-bookworm
+    timeout-minutes: 20
+    env:
+      RUSTUP_TOOLCHAIN: "1.95.0"
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      - name: Check workspace at MSRV
+        run: cargo check --locked --workspace --all-features --all-targets
+
   deny:
     name: cargo-deny
     runs-on: ubuntu-latest
     container:
-      image: rust:1.95-bookworm
+      image: rust:1.99.1-bookworm
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
@@ -146,7 +162,7 @@ jobs:
     name: Companion regression tests
     runs-on: ubuntu-latest
     container:
-      image: rust:1.95-bookworm
+      image: rust:1.99.1-bookworm
     timeout-minutes: 35
     needs: checks
     steps:
@@ -161,14 +177,14 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-${{ runner.os }}-
+          key: cargo-${{ runner.os }}-rust1.99.1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-${{ runner.os }}-rust1.99.1-
 
       - name: Install mise tools
         uses: jdx/mise-action@v4
         with:
           experimental: true
-          install_args: rust@1.95.0
+          install_args: rust@1.99.1
 
       - name: OIDC companion tests and examples
         run: cargo test --locked -p kunobi-openidconnect --all-features --all-targets
@@ -214,7 +230,7 @@ jobs:
         uses: jdx/mise-action@v4
         with:
           experimental: true
-          install_args: rust@1.95.0
+          install_args: rust@1.99.1
 
       - name: Native auth and keyring regressions
         run: cargo test --locked --all-features
@@ -224,7 +240,7 @@ jobs:
         env:
           IPHONEOS_DEPLOYMENT_TARGET: "13.0"
         run: |
-          rustup target add aarch64-apple-ios
+          rustup target add --toolchain 1.99.1 aarch64-apple-ios
           cargo check --locked --target aarch64-apple-ios --no-default-features --features client-core,keyring,rust_crypto
 
   e2e:
@@ -244,8 +260,8 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target
-          key: cargo-e2e-${{ runner.os }}-${{ hashFiles('Cargo.lock') }}
-          restore-keys: cargo-e2e-${{ runner.os }}-
+          key: cargo-e2e-${{ runner.os }}-rust1.99.1-${{ hashFiles('Cargo.lock') }}
+          restore-keys: cargo-e2e-${{ runner.os }}-rust1.99.1-
 
       - name: Install build toolchain
         # Dex runs on GitHub's Ubuntu host so Docker remains available.
@@ -256,12 +272,12 @@ jobs:
             sudo apt-get install -y --no-install-recommends build-essential pkg-config
           fi
 
-      # Use the same Rust 1.95.0 toolchain as the other jobs.
+      # Use the primary Rust 1.99.1 toolchain for Dex.
       - name: Install mise tools
         uses: jdx/mise-action@v4
         with:
           experimental: true # .mise.toml also defines cargo-backed local tools
-          install_args: rust@1.95.0
+          install_args: rust@1.99.1
 
       - name: Build Dex image
         run: docker build -t kunobi-dex -f tests/fixtures/Dockerfile.dex tests/fixtures

@@ -1,12 +1,12 @@
 # Toolchain pinning for local development and CI.
 #
 # Local: install `mise` (https://mise.jdx.dev), then `mise install` in this
-# directory provisions everything below. CI uses jdx/mise-action@v2 to do
+# directory provisions everything below. CI uses jdx/mise-action@v4 to do
 # the same in the workflow.
 
 [tools]
-# Match the CI image (`rust:1.95-bookworm`) for reproducibility.
-rust = "1.95.0"
+# Match the CI image (`rust:1.99.1-bookworm`) for reproducibility.
+rust = "1.99.1"
 
 # Static-analysis CLI used by `.github/workflows/ci.yml`.
 "aqua:EmbarkStudios/cargo-deny" = "0.19.4"
@@ -17,7 +17,7 @@ rust = "1.95.0"
 
 [env]
 # Honour the version above, even if a global rustup override is set.
-RUSTUP_TOOLCHAIN = "1.95.0"
+RUSTUP_TOOLCHAIN = "1.99.1"
 
 [tasks.mutants]
 description = "Run cargo-mutants to surface untested code-mutation survivors. Mutates a working copy, not your source tree (safe to interrupt)."
