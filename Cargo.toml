@@ -1,9 +1,9 @@
 [package]
 name = "kunobi-auth"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2024"
 rust-version = "1.94"
-license = "Apache-2.0"
+license = "Apache-2.0 AND MIT"
 description = "Authentication framework for Kunobi services — OIDC login, JWT validation, token management"
 repository = "https://github.com/kunobi-ninja/kunobi-auth"
 readme = "README.md"
@@ -11,7 +11,11 @@ keywords = ["oidc", "authentication", "jwt", "kubernetes", "operator"]
 categories = ["authentication", "web-programming"]
 # Publish only what builds the library. Tests, fuzz targets, CI and tool output
 # (such as cargo-mutants runs) stay in the repository.
-include = ["/src/**/*.rs", "/README.md", "/LICENSE"]
+include = ["/src/**/*.rs", "/README.md", "/LICENSE", "/LICENSES/jsonwebtoken-MIT"]
+
+[workspace]
+members = ["crates/openidconnect", "crates/ssh-agent-client"]
+resolver = "3"
 
 [features]
 default = ["client", "browser-login", "server", "rust_crypto", "aws-lc-tls"]
@@ -19,15 +23,21 @@ default = ["client", "browser-login", "server", "rust_crypto", "aws-lc-tls"]
 # with its bundled aws-lc-rs provider. Every feature below that makes HTTP
 # calls implies it, except the `-core` variants.
 aws-lc-tls = ["reqwest/rustls"]
-# jsonwebtoken crypto backend selection. Cargo unifies features across the
-# whole dependency graph, and jsonwebtoken 11 panics on first signer/verifier
-# use when BOTH backends end up enabled (it cannot auto-select a provider).
-# Consumers that already link aws-lc-rs (e.g. via rustls/surrealdb) should
-# disable default features and enable `aws_lc_rs` instead. If neither backend
-# is enabled, the consumer must call
-# `jsonwebtoken::crypto::CryptoProvider::install_default()` before any JWT
-# operation.
-rust_crypto = ["jsonwebtoken/rust_crypto"]
+# JWT provider selection. RustCrypto uses jsonwebtoken's public provider API;
+# it does not enable jsonwebtoken's built-in `rust_crypto` feature. An existing
+# application provider wins; when both auth features are enabled, RustCrypto
+# is installed first. With neither enabled, the application installs a provider.
+# The JWT extension uses current curve dependencies while retaining jsonwebtoken 11's API.
+rust_crypto = [
+    "dep:jwt-crypto-bigint",
+    "dep:jwt-ed25519-dalek",
+    "dep:jwt-hmac",
+    "dep:jwt-p256",
+    "dep:jwt-p384",
+    "dep:jwt-rand",
+    "dep:jwt-rsa",
+    "dep:jwt-sha2",
+]
 aws_lc_rs = ["jsonwebtoken/aws_lc_rs"]
 # Client token management: cached token store, refresh, revocation,
 # introspection, device-grant. Axum-free.
@@ -74,7 +84,7 @@ url = { version = "2", optional = true }
 zeroize = { version = "1", optional = true }
 
 # OIDC (client)
-openidconnect = { version = "4.0", optional = true }
+openidconnect = { package = "kunobi-openidconnect", version = "=4.0.1-kunobi.1", path = "crates/openidconnect", optional = true }
 oauth2 = { version = "5.0", optional = true }
 
 # OS keychain backend (optional `keyring` feature). Native backends only;
@@ -91,7 +101,19 @@ serde_json = "1"
 
 # JWT validation (server). Crypto backend is selected via this crate's
 # `rust_crypto` / `aws_lc_rs` features — see [features] above.
-jsonwebtoken = { version = "11", default-features = false, features = ["use_pem"] }
+jsonwebtoken = { version = "11.1.0", default-features = false, features = ["use_pem"] }
+
+# Private RustCrypto JWT implementation. Its public signer/verifier traits remain
+# jsonwebtoken's signature 2 API; the updated curves use signature 3 internally.
+# The floor also constrains elliptic-curve's compatible crypto-bigint requirement.
+jwt-crypto-bigint = { package = "crypto-bigint", version = "0.7.6", optional = true, default-features = false }
+jwt-ed25519-dalek = { package = "ed25519-dalek", version = "2.1.1", optional = true, features = ["pkcs8"] }
+jwt-hmac = { package = "hmac", version = "0.12.1", optional = true, features = ["reset"] }
+jwt-p256 = { package = "p256", version = "0.14.0", optional = true, default-features = false, features = ["alloc", "ecdsa", "pkcs8", "precomputed-tables"] }
+jwt-p384 = { package = "p384", version = "0.14.0", optional = true, default-features = false, features = ["alloc", "ecdsa", "pkcs8", "precomputed-tables"] }
+jwt-rand = { package = "rand", version = "0.8.5", optional = true, default-features = false, features = ["std", "std_rng"] }
+jwt-rsa = { package = "rsa", version = "0.9.6", optional = true }
+jwt-sha2 = { package = "sha2", version = "0.10.7", optional = true, features = ["oid"] }
 
 # Browser (client)
 open = { version = "5", optional = true }
@@ -129,7 +151,7 @@ anyhow = "1"
 
 # Logging
 tracing = "0.1"
-ssh-agent-client-rs = "1.1.3"
+ssh-agent-client-rs = { package = "kunobi-ssh-agent-client-rs", version = "=1.1.4-kunobi.1", path = "crates/ssh-agent-client" }
 
 [dev-dependencies]
 http-body-util = "0.1"

@@ -47,7 +47,7 @@ jobs:
         run: |
           version="${RELEASE_TAG#v}"
           manifest_version="$(cargo metadata --no-deps --format-version 1 \
-            | python3 -c 'import json,sys; print(json.load(sys.stdin)["packages"][0]["version"])')"
+            | python3 -c 'import json,sys; print(next(p["version"] for p in json.load(sys.stdin)["packages"] if p["name"] == "kunobi-auth"))')"
           if [ "$manifest_version" != "$version" ]; then
             echo "Cargo.toml version $manifest_version does not match release tag $RELEASE_TAG" >&2
             exit 1
