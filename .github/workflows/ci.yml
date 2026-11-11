@@ -56,7 +56,7 @@ jobs:
       # Installs Rust from .mise.toml so local and CI toolchains share one
       # source of truth.
       - name: Install mise tools
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@v5
         with:
           experimental: true
           install_args: rust@1.99.1
@@ -152,7 +152,7 @@ jobs:
           restore-keys: cargo-deny-${{ runner.os }}-
 
       - name: Install cargo-deny
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@v5
         with:
           experimental: true
           install_args: aqua:EmbarkStudios/cargo-deny@0.19.4
@@ -182,7 +182,7 @@ jobs:
           restore-keys: cargo-${{ runner.os }}-rust1.99.1-
 
       - name: Install mise tools
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@v5
         with:
           experimental: true
           install_args: rust@1.99.1
@@ -228,7 +228,7 @@ jobs:
           persist-credentials: false
 
       - name: Install Rust
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@v5
         with:
           experimental: true
           install_args: rust@1.99.1
@@ -274,7 +274,7 @@ jobs:
 
       # Use the primary Rust 1.99.1 toolchain for Dex.
       - name: Install mise tools
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@v5
         with:
           experimental: true # .mise.toml also defines cargo-backed local tools
           install_args: rust@1.99.1
