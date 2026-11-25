@@ -34,7 +34,7 @@ jobs:
 
       # Installs Rust 1.99.1 from .mise.toml so publish builds match CI.
       - name: Install mise tools
-        uses: jdx/mise-action@v4
+        uses: jdx/mise-action@v5
         with:
           experimental: true
           install_args: rust@1.99.1
@@ -61,7 +61,7 @@ jobs:
         id: auth
         # Pinned to v1.0.4: the floating @v1 tag still runs on the deprecated
         # Node 20 runtime; v1.0.4 is the first node24 release.
-        uses: rust-lang/crates-io-auth-action@v1.0.5
+        uses: rust-lang/crates-io-auth-action@v1.0.6
 
       - name: Publish kunobi-auth
         env:
