@@ -17,7 +17,7 @@ bytes = "1.12"
 ssh-key = { version = "0.6.7", default-features = false, features = ["std", "ecdsa"] }
 # Keep the encoding traits in the same family as ssh-key.
 ssh-encoding = "0.2"
-signature = "2.2"
+signature = "3.0"
 thiserror = "2.0"
 
 [dev-dependencies]

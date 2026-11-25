@@ -99,7 +99,7 @@ serde_json = "1"
 
 # JWT validation (server). Crypto backend is selected via this crate's
 # `rust_crypto` / `aws_lc_rs` features — see [features] above.
-jsonwebtoken = { version = "11.1.0", default-features = false, features = ["use_pem"] }
+jsonwebtoken = { version = "12.0.0", default-features = false, features = ["use_pem"] }
 
 # Private RustCrypto JWT implementation. Its public signer/verifier traits remain
 # jsonwebtoken's signature 2 API; the updated curves use signature 3 internally.
@@ -128,7 +128,7 @@ tempfile = { version = "3", optional = true }
 # different OS-specific implementations behind a portable API so the
 # same code works on Linux, macOS, and Windows. Minimum feature set
 # (just process listings) — we don't read disk/cpu/network.
-sysinfo = { version = "0.39.6", default-features = false, features = ["system"], optional = true }
+sysinfo = { version = "0.40.4", default-features = false, features = ["system"], optional = true }
 
 # Time
 chrono = { version = "0.4", features = ["serde"] }
